@@ -4,7 +4,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, Sparkles, Stars } from "@react-three/drei";
 import { Chess, type Color, type PieceSymbol, type Square } from "chess.js";
 import { useEffect, useMemo, useRef } from "react";
-import { AdditiveBlending, Color as ThreeColor, Vector3 } from "three";
+import { AdditiveBlending, Color as ThreeColor, Fog, Vector3 } from "three";
 import type { Group, Mesh, PerspectiveCamera, ShaderMaterial } from "three";
 import type { PlayerColor, PublicRoom } from "@/lib/rooms/types";
 
@@ -29,6 +29,17 @@ const FILES = "abcdefgh";
 const PLANET_LIGHT_DIRECTION = new Vector3(-0.45, 0.72, 0.54).normalize();
 const BOARD_INVERSION_RISE = 0.78;
 const BOARD_INVERSION_SECONDS = 5.6;
+const BOARD_SURFACE_SECONDS = 24;
+const BOARD_DESCEND_SECONDS = 8;
+const BOARD_UNDERWATER_SECONDS = 18;
+const BOARD_ASCEND_SECONDS = 9;
+const BOARD_SUBMERSION_DEPTH = 2.25;
+const BOARD_SUBMERSION_TOTAL_SECONDS =
+  BOARD_SURFACE_SECONDS +
+  BOARD_DESCEND_SECONDS +
+  BOARD_UNDERWATER_SECONDS +
+  BOARD_ASCEND_SECONDS;
+const WATER_SURFACE_Y = -0.23;
 
 type PlanetPalette = {
   shadow: string;
@@ -230,6 +241,7 @@ const PLANET_ATMOSPHERE_FRAGMENT_SHADER = `
 const WATER_VERTEX_SHADER = `
   uniform float uTime;
   uniform float uAudioIntensity;
+  uniform float uSubmersion;
 
   varying vec3 vWorldPosition;
   varying float vWave;
@@ -244,7 +256,7 @@ const WATER_VERTEX_SHADER = `
     float fineWave = sin(point.x * 1.45 + point.y * 0.55 + uTime * 1.7) * 0.16;
 
     vWave = broadWave + fineWave;
-    transformed.z += vWave * (0.026 + uAudioIntensity * 0.018);
+    transformed.z += vWave * (0.026 + uAudioIntensity * 0.018) * (1.0 + uSubmersion * 0.55);
 
     vec4 worldPosition = modelMatrix * vec4(transformed, 1.0);
     vWorldPosition = worldPosition.xyz;
@@ -260,6 +272,7 @@ const WATER_FRAGMENT_SHADER = `
   uniform vec3 uGlowColor;
   uniform float uTime;
   uniform float uAudioIntensity;
+  uniform float uSubmersion;
 
   varying vec3 vWorldPosition;
   varying float vWave;
@@ -287,8 +300,68 @@ const WATER_FRAGMENT_SHADER = `
     color += uGlowColor * softSheen * (0.55 + uAudioIntensity * 0.28);
     color = mix(color, uFoamColor, wake * (0.34 + uAudioIntensity * 0.14));
     color += uFoamColor * current * 0.08;
+    color = mix(color, uDeepColor, uSubmersion * 0.22);
 
-    float alpha = 0.9 + current * 0.05 + wake * 0.06 + glint * 0.03;
+    float surfaceAlpha = 0.9 + current * 0.05 + wake * 0.06 + glint * 0.03;
+    float underwaterAlpha = 0.36 + current * 0.05 + wake * 0.03 + glint * 0.04;
+    float alpha = mix(surfaceAlpha, underwaterAlpha, uSubmersion);
+    gl_FragColor = vec4(color, alpha);
+  }
+`;
+
+const UNDERWATER_SURFACE_VERTEX_SHADER = `
+  uniform float uTime;
+  uniform float uAudioIntensity;
+  uniform float uSubmersion;
+
+  varying vec2 vPoint;
+  varying float vRipple;
+
+  void main() {
+    vec3 transformed = position;
+    vec2 point = position.xy;
+    float broad =
+      sin(point.x * 1.35 + uTime * 0.62) * 0.5 +
+      sin(point.y * 1.7 - uTime * 0.54) * 0.35;
+    float fine = sin((point.x - point.y) * 4.4 + uTime * 1.35) * 0.12;
+
+    vPoint = point;
+    vRipple = broad + fine;
+    transformed.z += vRipple * (0.045 + uAudioIntensity * 0.024) * uSubmersion;
+
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(transformed, 1.0);
+  }
+`;
+
+const UNDERWATER_SURFACE_FRAGMENT_SHADER = `
+  uniform vec3 uDeepColor;
+  uniform vec3 uFoamColor;
+  uniform vec3 uGlowColor;
+  uniform float uTime;
+  uniform float uAudioIntensity;
+  uniform float uSubmersion;
+
+  varying vec2 vPoint;
+  varying float vRipple;
+
+  float beam(vec2 point, float angle, float speed, float width) {
+    vec2 direction = vec2(cos(angle), sin(angle));
+    float wave = sin(dot(point, direction) * 2.9 + uTime * speed) * 0.5 + 0.5;
+    return smoothstep(1.0 - width, 1.0, wave);
+  }
+
+  void main() {
+    float caustics =
+      beam(vPoint, 0.42, 0.8, 0.16) * 0.48 +
+      beam(vPoint, 1.9, -0.64, 0.12) * 0.36 +
+      beam(vPoint * 1.35, 2.7, 0.46, 0.08) * 0.24;
+    float centerFade = 1.0 - smoothstep(4.6, 6.1, length(vPoint));
+    float rippleGlow = smoothstep(0.24, 0.88, vRipple * 0.5 + 0.5);
+
+    vec3 color = mix(uDeepColor, uFoamColor, caustics * 0.38 + rippleGlow * 0.16);
+    color += uGlowColor * (0.15 + caustics * 0.4 + uAudioIntensity * 0.18);
+
+    float alpha = uSubmersion * centerFade * (0.1 + caustics * 0.1 + rippleGlow * 0.04);
     gl_FragColor = vec4(color, alpha);
   }
 `;
@@ -323,6 +396,26 @@ function squarePosition(square: Square, perspective: PlayerColor): [number, numb
 function smoothStep(value: number): number {
   const clamped = Math.max(0, Math.min(1, value));
   return clamped * clamped * (3 - 2 * clamped);
+}
+
+function boardSubmersionForTime(time: number): number {
+  const phase = time % BOARD_SUBMERSION_TOTAL_SECONDS;
+  const descendEnd = BOARD_SURFACE_SECONDS + BOARD_DESCEND_SECONDS;
+  const underwaterEnd = descendEnd + BOARD_UNDERWATER_SECONDS;
+
+  if (phase < BOARD_SURFACE_SECONDS) {
+    return 0;
+  }
+
+  if (phase < descendEnd) {
+    return smoothStep((phase - BOARD_SURFACE_SECONDS) / BOARD_DESCEND_SECONDS);
+  }
+
+  if (phase < underwaterEnd) {
+    return 1;
+  }
+
+  return 1 - smoothStep((phase - underwaterEnd) / BOARD_ASCEND_SECONDS);
 }
 
 function PieceMaterial({
@@ -608,11 +701,15 @@ function Board({
     }
 
     const eased = smoothStep(inversionProgressRef.current);
+    const submersion = boardSubmersionForTime(clock.elapsedTime);
     const breath = Math.sin(clock.elapsedTime * 0.42) * 0.026;
 
-    groupRef.current.position.y = breath + eased * BOARD_INVERSION_RISE;
+    groupRef.current.position.y =
+      breath + eased * BOARD_INVERSION_RISE - submersion * BOARD_SUBMERSION_DEPTH;
     groupRef.current.rotation.y = eased * Math.PI;
-    groupRef.current.rotation.z = Math.sin(clock.elapsedTime * 0.28) * 0.018 * eased;
+    groupRef.current.rotation.z =
+      Math.sin(clock.elapsedTime * 0.28) * 0.018 * eased +
+      Math.sin(clock.elapsedTime * 0.5) * 0.01 * submersion;
   });
 
   return (
@@ -655,6 +752,7 @@ function WaterPlane({ audioIntensity }: { audioIntensity: number }) {
       uFoamColor: { value: new ThreeColor("#b8fff3") },
       uGlowColor: { value: new ThreeColor("#8af7ff") },
       uSurfaceColor: { value: new ThreeColor("#15959a") },
+      uSubmersion: { value: 0 },
       uTime: { value: 0 }
     }),
     []
@@ -668,16 +766,17 @@ function WaterPlane({ audioIntensity }: { audioIntensity: number }) {
     }
 
     meshRef.current.position.y =
-      -0.23 + Math.sin(time * 0.8) * 0.012 - audioIntensity * 0.025;
+      WATER_SURFACE_Y + Math.sin(time * 0.8) * 0.012 - audioIntensity * 0.025;
 
     if (materialRef.current) {
       materialRef.current.uniforms.uAudioIntensity.value = audioIntensity;
+      materialRef.current.uniforms.uSubmersion.value = boardSubmersionForTime(time);
       materialRef.current.uniforms.uTime.value = time;
     }
   });
 
   return (
-    <mesh ref={meshRef} position={[0, -0.23, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+    <mesh ref={meshRef} position={[0, WATER_SURFACE_Y, 0]} rotation={[-Math.PI / 2, 0, 0]}>
       <planeGeometry args={[110, 110, 144, 144]} />
       <shaderMaterial
         ref={materialRef}
@@ -689,6 +788,113 @@ function WaterPlane({ audioIntensity }: { audioIntensity: number }) {
       />
     </mesh>
   );
+}
+
+function UnderwaterSurface({ audioIntensity }: { audioIntensity: number }) {
+  const meshRef = useRef<Mesh | null>(null);
+  const materialRef = useRef<ShaderMaterial | null>(null);
+  const uniforms = useMemo(
+    () => ({
+      uAudioIntensity: { value: 0 },
+      uDeepColor: { value: new ThreeColor("#022935") },
+      uFoamColor: { value: new ThreeColor("#b8fff3") },
+      uGlowColor: { value: new ThreeColor("#7bd2ad") },
+      uSubmersion: { value: 0 },
+      uTime: { value: 0 }
+    }),
+    []
+  );
+
+  useFrame(({ clock }) => {
+    const time = clock.elapsedTime;
+    const submersion = boardSubmersionForTime(time);
+
+    if (meshRef.current) {
+      meshRef.current.visible = submersion > 0.015;
+      meshRef.current.position.y =
+        WATER_SURFACE_Y + 0.05 + Math.sin(time * 0.36) * 0.018;
+    }
+
+    if (materialRef.current) {
+      materialRef.current.uniforms.uAudioIntensity.value = audioIntensity;
+      materialRef.current.uniforms.uSubmersion.value = submersion;
+      materialRef.current.uniforms.uTime.value = time;
+    }
+  });
+
+  return (
+    <mesh
+      ref={meshRef}
+      position={[0, WATER_SURFACE_Y + 0.05, 0]}
+      renderOrder={5}
+      rotation={[-Math.PI / 2, 0, 0]}
+      visible={false}
+    >
+      <planeGeometry args={[12.5, 12.5, 96, 96]} />
+      <shaderMaterial
+        ref={materialRef}
+        blending={AdditiveBlending}
+        depthWrite={false}
+        fragmentShader={UNDERWATER_SURFACE_FRAGMENT_SHADER}
+        transparent
+        uniforms={uniforms}
+        vertexShader={UNDERWATER_SURFACE_VERTEX_SHADER}
+      />
+    </mesh>
+  );
+}
+
+function SceneAtmosphere() {
+  const { scene } = useThree();
+  const backgroundColorRef = useRef(new ThreeColor("#07090b"));
+  const fogRef = useRef<Fog | null>(null);
+  const paletteRef = useRef({
+    surfaceBackground: new ThreeColor("#07090b"),
+    surfaceFog: new ThreeColor("#0a0d0e"),
+    underwaterBackground: new ThreeColor("#021d26"),
+    underwaterFog: new ThreeColor("#043540")
+  });
+
+  useEffect(() => {
+    const fog = new Fog("#0a0d0e", 8, 28);
+
+    fogRef.current = fog;
+    scene.background = backgroundColorRef.current;
+    scene.fog = fog;
+
+    return () => {
+      if (scene.background === backgroundColorRef.current) {
+        scene.background = null;
+      }
+
+      if (scene.fog === fog) {
+        scene.fog = null;
+      }
+
+      fogRef.current = null;
+    };
+  }, [scene]);
+
+  useFrame(({ clock }) => {
+    const submersion = smoothStep(boardSubmersionForTime(clock.elapsedTime));
+    const current = Math.max(
+      0,
+      Math.min(1, submersion * (0.94 + Math.sin(clock.elapsedTime * 0.72) * 0.06))
+    );
+    const palette = paletteRef.current;
+
+    backgroundColorRef.current
+      .copy(palette.surfaceBackground)
+      .lerp(palette.underwaterBackground, current);
+
+    if (fogRef.current) {
+      fogRef.current.color.copy(palette.surfaceFog).lerp(palette.underwaterFog, current);
+      fogRef.current.near = 8 - current * 3.2;
+      fogRef.current.far = 28 - current * 8.5;
+    }
+  });
+
+  return null;
 }
 
 function Planet({
@@ -837,8 +1043,7 @@ function SceneContent(props: ElysiumSceneProps) {
 
   return (
     <>
-      <color attach="background" args={["#07090b"]} />
-      <fog attach="fog" args={["#0a0d0e", 8, 28]} />
+      <SceneAtmosphere />
       <ambientLight intensity={1.65} />
       <directionalLight intensity={2.6} position={[-3.5, 7, 4]} />
       <pointLight color="#f0a63b" intensity={18} position={[-4, 2.8, 3]} />
@@ -865,6 +1070,7 @@ function SceneContent(props: ElysiumSceneProps) {
         scale={1.35}
       />
       <WaterPlane audioIntensity={props.audioIntensity} />
+      <UnderwaterSurface audioIntensity={props.audioIntensity} />
       <Board
         audioIntensity={props.audioIntensity}
         fen={fen}
