@@ -1,11 +1,11 @@
 "use client";
 
-import { Canvas, useFrame } from "@react-three/fiber";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, Sparkles, Stars } from "@react-three/drei";
 import { Chess, type Color, type PieceSymbol, type Square } from "chess.js";
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { AdditiveBlending, Color as ThreeColor, Vector3 } from "three";
-import type { Group, Mesh, ShaderMaterial } from "three";
+import type { Group, Mesh, PerspectiveCamera, ShaderMaterial } from "three";
 import type { PlayerColor, PublicRoom } from "@/lib/rooms/types";
 
 type ScenePiece = {
@@ -221,6 +221,72 @@ const PLANET_ATMOSPHERE_FRAGMENT_SHADER = `
     float alpha = rim * (0.32 + uAudioIntensity * 0.18) + pulse * rim * 0.04;
 
     gl_FragColor = vec4(uAtmosphereColor, alpha);
+  }
+`;
+
+const WATER_VERTEX_SHADER = `
+  uniform float uTime;
+  uniform float uAudioIntensity;
+
+  varying vec3 vWorldPosition;
+  varying float vWave;
+
+  void main() {
+    vec3 transformed = position;
+    vec2 point = position.xy;
+    float broadWave =
+      sin(point.x * 0.2 + uTime * 0.55) * 0.5 +
+      sin(point.y * 0.24 - uTime * 0.42) * 0.38 +
+      sin((point.x + point.y) * 0.13 + uTime * 0.34) * 0.28;
+    float fineWave = sin(point.x * 1.45 + point.y * 0.55 + uTime * 1.7) * 0.16;
+
+    vWave = broadWave + fineWave;
+    transformed.z += vWave * (0.026 + uAudioIntensity * 0.018);
+
+    vec4 worldPosition = modelMatrix * vec4(transformed, 1.0);
+    vWorldPosition = worldPosition.xyz;
+
+    gl_Position = projectionMatrix * viewMatrix * worldPosition;
+  }
+`;
+
+const WATER_FRAGMENT_SHADER = `
+  uniform vec3 uDeepColor;
+  uniform vec3 uSurfaceColor;
+  uniform vec3 uFoamColor;
+  uniform vec3 uGlowColor;
+  uniform float uTime;
+  uniform float uAudioIntensity;
+
+  varying vec3 vWorldPosition;
+  varying float vWave;
+
+  float stripe(vec2 point, float speed, float width) {
+    float wave = sin(point.x * 0.82 + point.y * 0.46 + uTime * speed) * 0.5 + 0.5;
+    return smoothstep(1.0 - width, 1.0, wave);
+  }
+
+  void main() {
+    vec2 worldPoint = vWorldPosition.xz;
+    float distanceFromCenter = length(worldPoint);
+    float tableEdge = max(abs(worldPoint.x), abs(worldPoint.y));
+    float nearTable = smoothstep(4.1, 4.55, tableEdge) * (1.0 - smoothstep(5.8, 7.4, tableEdge));
+    float tableRipple = sin(tableEdge * 8.4 - uTime * 1.75) * 0.5 + 0.5;
+    float wake = nearTable * smoothstep(0.58, 1.0, tableRipple);
+    float current =
+      stripe(worldPoint, 0.7, 0.08) * 0.34 +
+      stripe(worldPoint.yx * vec2(0.74, 1.18), -0.52, 0.05) * 0.22;
+    float glint = smoothstep(0.58, 1.0, vWave * 0.5 + 0.5) * (0.22 + uAudioIntensity * 0.32);
+    float depth = smoothstep(8.0, 34.0, distanceFromCenter);
+    float softSheen = 0.16 + current * 0.24 + glint * 0.22;
+
+    vec3 color = mix(uSurfaceColor, uDeepColor, depth * 0.72);
+    color += uGlowColor * softSheen * (0.55 + uAudioIntensity * 0.28);
+    color = mix(color, uFoamColor, wake * (0.34 + uAudioIntensity * 0.14));
+    color += uFoamColor * current * 0.08;
+
+    float alpha = 0.9 + current * 0.05 + wake * 0.06 + glint * 0.03;
+    gl_FragColor = vec4(color, alpha);
   }
 `;
 
@@ -541,23 +607,45 @@ function Board({
 
 function WaterPlane({ audioIntensity }: { audioIntensity: number }) {
   const meshRef = useRef<Mesh | null>(null);
+  const materialRef = useRef<ShaderMaterial | null>(null);
+  const uniforms = useMemo(
+    () => ({
+      uAudioIntensity: { value: 0 },
+      uDeepColor: { value: new ThreeColor("#064452") },
+      uFoamColor: { value: new ThreeColor("#b8fff3") },
+      uGlowColor: { value: new ThreeColor("#8af7ff") },
+      uSurfaceColor: { value: new ThreeColor("#15959a") },
+      uTime: { value: 0 }
+    }),
+    []
+  );
 
   useFrame(({ clock }) => {
+    const time = clock.elapsedTime;
+
     if (!meshRef.current) {
       return;
     }
 
     meshRef.current.position.y =
-      -0.16 + Math.sin(clock.elapsedTime * 0.8) * 0.012 - audioIntensity * 0.025;
+      -0.23 + Math.sin(time * 0.8) * 0.012 - audioIntensity * 0.025;
+
+    if (materialRef.current) {
+      materialRef.current.uniforms.uAudioIntensity.value = audioIntensity;
+      materialRef.current.uniforms.uTime.value = time;
+    }
   });
 
   return (
-    <mesh ref={meshRef} position={[0, -0.16, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-      <planeGeometry args={[90, 90, 1, 1]} />
-      <meshBasicMaterial
-        color="#0a1718"
-        opacity={0.78}
+    <mesh ref={meshRef} position={[0, -0.23, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+      <planeGeometry args={[110, 110, 144, 144]} />
+      <shaderMaterial
+        ref={materialRef}
+        depthWrite={false}
+        fragmentShader={WATER_FRAGMENT_SHADER}
         transparent
+        uniforms={uniforms}
+        vertexShader={WATER_VERTEX_SHADER}
       />
     </mesh>
   );
@@ -683,6 +771,26 @@ function Planet({
   );
 }
 
+function ResponsiveCamera() {
+  const { camera, size } = useThree();
+
+  useEffect(() => {
+    const perspectiveCamera = camera as PerspectiveCamera;
+    const narrow = size.width < 700;
+
+    perspectiveCamera.position.set(
+      narrow ? 7.2 : 6.4,
+      narrow ? 6.3 : 5.9,
+      narrow ? 8.8 : 7.6
+    );
+    perspectiveCamera.fov = narrow ? 60 : 52;
+    perspectiveCamera.updateProjectionMatrix();
+    perspectiveCamera.lookAt(0, 0, 0);
+  }, [camera, size.width]);
+
+  return null;
+}
+
 function SceneContent(props: ElysiumSceneProps) {
   const perspective = props.playerColor ?? "white";
   const fen = props.room?.fen ?? STARTING_FEN;
@@ -725,10 +833,11 @@ function SceneContent(props: ElysiumSceneProps) {
         perspective={perspective}
         selectedSquare={props.selectedSquare}
       />
+      <ResponsiveCamera />
       <OrbitControls
         enableDamping
         enablePan={false}
-        maxDistance={12}
+        maxDistance={14}
         maxPolarAngle={Math.PI / 2.15}
         minDistance={6}
         minPolarAngle={Math.PI / 4}
@@ -741,7 +850,7 @@ function SceneContent(props: ElysiumSceneProps) {
 export function ElysiumScene(props: ElysiumSceneProps) {
   return (
     <Canvas
-      camera={{ position: [5.8, 5.4, 6.8], fov: 46 }}
+      camera={{ position: [6.4, 5.9, 7.6], fov: 52 }}
       dpr={1}
       gl={{ antialias: true, alpha: false }}
       onCreated={({ camera }) => {
