@@ -6,9 +6,6 @@ import { Chess, type Color, type PieceSymbol, type Square } from "chess.js";
 import { useEffect, useMemo, useRef } from "react";
 import { AdditiveBlending, Color as ThreeColor, Vector3 } from "three";
 import type { Group, Mesh, PerspectiveCamera, ShaderMaterial } from "three";
-import { useMemo, useRef } from "react";
-import { AdditiveBlending, Color as ThreeColor, Vector3 } from "three";
-import type { Group, Mesh, ShaderMaterial } from "three";
 import type { PlayerColor, PublicRoom } from "@/lib/rooms/types";
 
 type ScenePiece = {
@@ -224,6 +221,72 @@ const PLANET_ATMOSPHERE_FRAGMENT_SHADER = `
     float alpha = rim * (0.32 + uAudioIntensity * 0.18) + pulse * rim * 0.04;
 
     gl_FragColor = vec4(uAtmosphereColor, alpha);
+  }
+`;
+
+const WATER_VERTEX_SHADER = `
+  uniform float uTime;
+  uniform float uAudioIntensity;
+
+  varying vec3 vWorldPosition;
+  varying float vWave;
+
+  void main() {
+    vec3 transformed = position;
+    vec2 point = position.xy;
+    float broadWave =
+      sin(point.x * 0.2 + uTime * 0.55) * 0.5 +
+      sin(point.y * 0.24 - uTime * 0.42) * 0.38 +
+      sin((point.x + point.y) * 0.13 + uTime * 0.34) * 0.28;
+    float fineWave = sin(point.x * 1.45 + point.y * 0.55 + uTime * 1.7) * 0.16;
+
+    vWave = broadWave + fineWave;
+    transformed.z += vWave * (0.026 + uAudioIntensity * 0.018);
+
+    vec4 worldPosition = modelMatrix * vec4(transformed, 1.0);
+    vWorldPosition = worldPosition.xyz;
+
+    gl_Position = projectionMatrix * viewMatrix * worldPosition;
+  }
+`;
+
+const WATER_FRAGMENT_SHADER = `
+  uniform vec3 uDeepColor;
+  uniform vec3 uSurfaceColor;
+  uniform vec3 uFoamColor;
+  uniform vec3 uGlowColor;
+  uniform float uTime;
+  uniform float uAudioIntensity;
+
+  varying vec3 vWorldPosition;
+  varying float vWave;
+
+  float stripe(vec2 point, float speed, float width) {
+    float wave = sin(point.x * 0.82 + point.y * 0.46 + uTime * speed) * 0.5 + 0.5;
+    return smoothstep(1.0 - width, 1.0, wave);
+  }
+
+  void main() {
+    vec2 worldPoint = vWorldPosition.xz;
+    float distanceFromCenter = length(worldPoint);
+    float tableEdge = max(abs(worldPoint.x), abs(worldPoint.y));
+    float nearTable = smoothstep(4.1, 4.55, tableEdge) * (1.0 - smoothstep(5.8, 7.4, tableEdge));
+    float tableRipple = sin(tableEdge * 8.4 - uTime * 1.75) * 0.5 + 0.5;
+    float wake = nearTable * smoothstep(0.58, 1.0, tableRipple);
+    float current =
+      stripe(worldPoint, 0.7, 0.08) * 0.34 +
+      stripe(worldPoint.yx * vec2(0.74, 1.18), -0.52, 0.05) * 0.22;
+    float glint = smoothstep(0.58, 1.0, vWave * 0.5 + 0.5) * (0.22 + uAudioIntensity * 0.32);
+    float depth = smoothstep(8.0, 34.0, distanceFromCenter);
+    float softSheen = 0.16 + current * 0.24 + glint * 0.22;
+
+    vec3 color = mix(uSurfaceColor, uDeepColor, depth * 0.72);
+    color += uGlowColor * softSheen * (0.55 + uAudioIntensity * 0.28);
+    color = mix(color, uFoamColor, wake * (0.34 + uAudioIntensity * 0.14));
+    color += uFoamColor * current * 0.08;
+
+    float alpha = 0.9 + current * 0.05 + wake * 0.06 + glint * 0.03;
+    gl_FragColor = vec4(color, alpha);
   }
 `;
 
