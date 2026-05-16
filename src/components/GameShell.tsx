@@ -3,11 +3,16 @@
 import dynamic from "next/dynamic";
 import { Chess, type Square } from "chess.js";
 import {
+  Bot,
+  ChevronDown,
   Clipboard,
   DoorOpen,
+  Gamepad2,
   LogIn,
+  MousePointer2,
   Plus,
   RotateCw,
+  Smartphone,
   Volume2,
   VolumeX
 } from "lucide-react";
@@ -19,7 +24,7 @@ import {
   useRef,
   useState
 } from "react";
-import type { PlayerColor, PublicRoom } from "@/lib/rooms/types";
+import type { PlayerColor, PublicRoom, RoomMode } from "@/lib/rooms/types";
 
 const ElysiumScene = dynamic(
   () => import("./ElysiumScene").then((module) => module.ElysiumScene),
@@ -33,6 +38,7 @@ type Session = {
   roomId: string;
   playerToken: string;
   color: PlayerColor;
+  mode?: RoomMode;
 };
 
 type RoomActionResponse = {
@@ -42,7 +48,7 @@ type RoomActionResponse = {
   room: PublicRoom;
 };
 
-type BusyAction = "create" | "join" | "move" | "refresh" | null;
+type BusyAction = "create" | "solo" | "join" | "move" | "refresh" | null;
 
 const SESSION_KEY = "enter-elysium-session";
 
@@ -96,7 +102,7 @@ function loadSession(): Session | null {
 
 function statusText(room: PublicRoom | null, playerColor?: PlayerColor): string {
   if (!room) {
-    return "Create a room or join by code.";
+    return "Start a solo game, create a room, or join by code.";
   }
 
   if (room.status === "waiting") {
@@ -104,11 +110,25 @@ function statusText(room: PublicRoom | null, playerColor?: PlayerColor): string 
   }
 
   if (room.status === "over") {
+    if (room.mode === "single-player" && room.winner) {
+      return room.winner === playerColor
+        ? "Checkmate. You win."
+        : "Checkmate. Elysium AI wins.";
+    }
+
     if (room.result === "checkmate" && room.winner) {
       return `Checkmate. ${room.winner === "white" ? "White" : "Black"} wins.`;
     }
 
     return `Game over by ${room.result ?? "draw"}.`;
+  }
+
+  if (room.mode === "single-player") {
+    if (room.turn === playerColor) {
+      return "Your move. Tap a piece, then a highlighted square.";
+    }
+
+    return "Elysium AI to move.";
   }
 
   const turn = room.turn === "white" ? "White" : "Black";
@@ -306,6 +326,34 @@ function AudioControl({
   );
 }
 
+function ControlsGuide() {
+  return (
+    <details className="controls-guide">
+      <summary>
+        <span>
+          <Gamepad2 size={18} />
+          Controls
+        </span>
+        <ChevronDown size={18} />
+      </summary>
+      <div className="guide-items">
+        <div className="guide-item">
+          <MousePointer2 size={18} />
+          <span>Tap one of your pieces to select it, then tap a green square to move.</span>
+        </div>
+        <div className="guide-item">
+          <Smartphone size={18} />
+          <span>Drag the board to rotate the view. Pinch or scroll to zoom.</span>
+        </div>
+        <div className="guide-item">
+          <Bot size={18} />
+          <span>In Solo vs AI, the AI answers automatically after your move.</span>
+        </div>
+      </div>
+    </details>
+  );
+}
+
 export function GameShell() {
   const [room, setRoom] = useState<PublicRoom | null>(null);
   const [session, setSession] = useState<Session | null>(null);
@@ -349,11 +397,18 @@ export function GameShell() {
         }
 
         setRoom(refreshed);
+        if (refreshed.mode === "single-player") {
+          setJoinCode("");
+        }
 
-        if (refreshed.playerColor && refreshed.playerColor !== session.color) {
+        if (
+          refreshed.playerColor &&
+          (refreshed.playerColor !== session.color || refreshed.mode !== session.mode)
+        ) {
           const updatedSession = {
             ...session,
-            color: refreshed.playerColor
+            color: refreshed.playerColor,
+            mode: refreshed.mode
           };
           setSession(updatedSession);
           saveSession(updatedSession);
@@ -410,7 +465,8 @@ export function GameShell() {
       const nextSession = {
         roomId: result.roomId,
         playerToken: result.playerToken,
-        color: result.color
+        color: result.color,
+        mode: result.room.mode
       };
       saveSession(nextSession);
       setSession(nextSession);
@@ -419,6 +475,32 @@ export function GameShell() {
       setSelectedSquare(null);
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : "Create failed.");
+    } finally {
+      setBusy(null);
+    }
+  }, []);
+
+  const createSoloRoom = useCallback(async () => {
+    setBusy("solo");
+    setError(null);
+
+    try {
+      const result = await api<RoomActionResponse>("/api/rooms/solo", {
+        method: "POST"
+      });
+      const nextSession = {
+        roomId: result.roomId,
+        playerToken: result.playerToken,
+        color: result.color,
+        mode: result.room.mode
+      };
+      saveSession(nextSession);
+      setSession(nextSession);
+      setRoom(result.room);
+      setJoinCode("");
+      setSelectedSquare(null);
+    } catch (soloError) {
+      setError(soloError instanceof Error ? soloError.message : "Solo game failed.");
     } finally {
       setBusy(null);
     }
@@ -444,7 +526,8 @@ export function GameShell() {
         const nextSession = {
           roomId: result.roomId,
           playerToken: result.playerToken,
-          color: result.color
+          color: result.color,
+          mode: result.room.mode
         };
         saveSession(nextSession);
         setSession(nextSession);
@@ -551,7 +634,13 @@ export function GameShell() {
         <div className="status-line">
           <span className={`status-dot ${statusClass(room)}`} />
           <span>
-            <strong>{playerColor ? `${playerColor} player` : "No seat"}</strong>{" "}
+            <strong>
+              {room?.mode === "single-player"
+                ? "Solo vs AI"
+                : playerColor
+                  ? `${playerColor} player`
+                  : "No seat"}
+            </strong>{" "}
             {statusText(room, playerColor)}
           </span>
         </div>
@@ -561,12 +650,24 @@ export function GameShell() {
             <button
               className="primary-button"
               disabled={Boolean(busy)}
+              onClick={createSoloRoom}
+              type="button"
+            >
+              <Bot size={18} />
+              Solo vs AI
+            </button>
+            <button
+              className="secondary-button"
+              disabled={Boolean(busy)}
               onClick={createNewRoom}
               type="button"
             >
               <Plus size={18} />
               New room
             </button>
+          </div>
+
+          <div className="button-row single-action">
             <button
               className="secondary-button"
               disabled={!room || Boolean(busy)}
@@ -596,7 +697,7 @@ export function GameShell() {
             </button>
           </form>
 
-          {room ? (
+          {room?.mode === "multiplayer" ? (
             <div className="room-code">
               <div>
                 <span>Room</span>
@@ -612,6 +713,13 @@ export function GameShell() {
                 Copy
               </button>
             </div>
+          ) : room ? (
+            <div className="room-code solo-room">
+              <div>
+                <span>Opponent</span>
+                <strong>AI BLACK</strong>
+              </div>
+            </div>
           ) : null}
         </div>
 
@@ -621,6 +729,8 @@ export function GameShell() {
             <span className="error-text">{error}</span>
           </div>
         ) : null}
+
+        <ControlsGuide />
 
         <div className="moves">
           {busy === "refresh" ? <RotateCw size={18} /> : null}

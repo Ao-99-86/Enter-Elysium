@@ -1,6 +1,7 @@
 import type { Color, PieceSymbol, Square } from "chess.js";
 
 export type PlayerColor = "white" | "black";
+export type RoomMode = "multiplayer" | "single-player";
 export type RoomStatus = "waiting" | "active" | "over";
 export type GameResult =
   | "checkmate"
@@ -25,6 +26,8 @@ export type MoveRecord = {
 
 export type Room = {
   id: string;
+  mode: RoomMode;
+  aiColor?: PlayerColor;
   fen: string;
   pgn: string;
   whiteToken: string;
@@ -40,6 +43,8 @@ export type Room = {
 
 export type PublicRoom = {
   id: string;
+  mode: RoomMode;
+  aiColor?: PlayerColor;
   fen: string;
   pgn: string;
   turn: PlayerColor;

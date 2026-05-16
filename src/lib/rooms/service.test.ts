@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { Chess } from "chess.js";
+import { chooseGreedyAiMove } from "./ai";
 import { createMemoryRoomStore, resetMemoryRoomStore } from "./memory-store";
 import {
   createRoom,
+  createSinglePlayerRoom,
   getRoom,
   joinRoom,
   submitMove
@@ -30,6 +32,7 @@ async function createActiveRoom() {
 async function seedRoom(room: Partial<Room> & Pick<Room, "id" | "whiteToken">): Promise<Room> {
   const now = Date.now();
   const seeded: Room = {
+    mode: "multiplayer",
     fen: new Chess().fen(),
     pgn: "",
     blackToken: "black-token",
@@ -56,6 +59,77 @@ describe("rooms service", () => {
     expect(joined.color).toBe("black");
     expect(joined.room.players).toEqual({ white: true, black: true });
     expect(joined.room.status).toBe("active");
+  });
+
+  it("creates an active solo room against black AI", async () => {
+    const created = await createSinglePlayerRoom(store);
+
+    expect(created.color).toBe("white");
+    expect(created.room.mode).toBe("single-player");
+    expect(created.room.aiColor).toBe("black");
+    expect(created.room.players).toEqual({ white: true, black: true });
+    expect(created.room.status).toBe("active");
+    expect(created.room.turn).toBe("white");
+  });
+
+  it("rejects joining solo rooms", async () => {
+    const created = await createSinglePlayerRoom(store);
+
+    await expect(joinRoom(store, created.roomId)).rejects.toMatchObject({
+      status: 409,
+      code: "single_player_room"
+    });
+  });
+
+  it("plays an AI response after a solo human move", async () => {
+    const created = await createSinglePlayerRoom(store);
+    const room = await submitMove(store, created.roomId, {
+      from: "e2",
+      to: "e4",
+      playerToken: created.playerToken
+    });
+
+    expect(room.mode).toBe("single-player");
+    expect(room.turn).toBe("white");
+    expect(room.moves).toHaveLength(2);
+    expect(room.moves[0].color).toBe("white");
+    expect(room.moves[1].color).toBe("black");
+  });
+
+  it("chooses a valuable capture for the solo AI", async () => {
+    await seedRoom({
+      id: "AICAP1",
+      mode: "single-player",
+      aiColor: "black",
+      whiteToken: "white-token",
+      blackToken: undefined,
+      fen: "k7/8/8/4b3/3Q4/8/4P3/7K w - - 0 1"
+    });
+
+    const room = await submitMove(store, "AICAP1", {
+      from: "e2",
+      to: "e3",
+      playerToken: "white-token"
+    });
+
+    expect(room.moves).toHaveLength(2);
+    expect(room.lastMove).toMatchObject({
+      color: "black",
+      from: "e5",
+      to: "d4",
+      captured: "q"
+    });
+  });
+
+  it("chooses checkmate when the AI has one", () => {
+    const chess = new Chess();
+    chess.move("f3");
+    chess.move("e5");
+    chess.move("g4");
+
+    const move = chooseGreedyAiMove(chess);
+
+    expect(move?.san).toBe("Qh4#");
   });
 
   it("returns player color when reconnecting with a token", async () => {

@@ -103,6 +103,10 @@ input:focus {
   background: linear-gradient(180deg, transparent, rgba(8, 9, 10, 0.46));
 }
 
+.scene-region canvas {
+  touch-action: none;
+}
+
 .side-panel {
   min-height: 100dvh;
   display: flex;
@@ -186,6 +190,10 @@ h1 {
   gap: 10px;
 }
 
+.single-action {
+  grid-template-columns: 1fr;
+}
+
 .icon-button,
 .primary-button,
 .secondary-button {
@@ -225,6 +233,65 @@ h1 {
 .room-code strong {
   font-size: 1.2rem;
   letter-spacing: 0.12em;
+}
+
+.controls-guide {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.controls-guide summary {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.controls-guide summary::-webkit-details-marker {
+  display: none;
+}
+
+.controls-guide summary span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-weight: 650;
+}
+
+.controls-guide summary > svg {
+  color: var(--muted);
+  transition: transform 160ms ease;
+}
+
+.controls-guide[open] summary > svg {
+  transform: rotate(180deg);
+}
+
+.guide-items {
+  display: grid;
+  gap: 10px;
+  padding: 0 12px 12px;
+}
+
+.guide-item {
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  align-items: start;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 0.92rem;
+  line-height: 1.35;
+}
+
+.guide-item svg {
+  color: var(--amber);
+  margin-top: 1px;
 }
 
 .moves {
