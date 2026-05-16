@@ -4,7 +4,8 @@ import { Canvas, useFrame } from "@react-three/fiber";
 import { OrbitControls, Sparkles, Stars } from "@react-three/drei";
 import { Chess, type Color, type PieceSymbol, type Square } from "chess.js";
 import { useMemo, useRef } from "react";
-import type { Group, Mesh } from "three";
+import { AdditiveBlending, Color as ThreeColor, Vector3 } from "three";
+import type { Group, Mesh, ShaderMaterial } from "three";
 import type { PlayerColor, PublicRoom } from "@/lib/rooms/types";
 
 type ScenePiece = {
@@ -24,6 +25,204 @@ type ElysiumSceneProps = {
 
 const STARTING_FEN = new Chess().fen();
 const FILES = "abcdefgh";
+const PLANET_LIGHT_DIRECTION = new Vector3(-0.45, 0.72, 0.54).normalize();
+
+type PlanetPalette = {
+  shadow: string;
+  base: string;
+  highlight: string;
+  ridge: string;
+  glow: string;
+  atmosphere: string;
+  cloud: string;
+  terrainScale: number;
+  bandOffset: number;
+  rotationSpeed: number;
+  cloudSpeed: number;
+};
+
+const PLANET_PALETTES: Record<"ember" | "azure", PlanetPalette> = {
+  ember: {
+    shadow: "#2a140d",
+    base: "#c0672d",
+    highlight: "#ffd38a",
+    ridge: "#6b2b37",
+    glow: "#f0a63b",
+    atmosphere: "#f7b35f",
+    cloud: "#ffe2a2",
+    terrainScale: 3.6,
+    bandOffset: 0.18,
+    rotationSpeed: 0.038,
+    cloudSpeed: 0.055
+  },
+  azure: {
+    shadow: "#101528",
+    base: "#526ec5",
+    highlight: "#d6e6ff",
+    ridge: "#7bd2ad",
+    glow: "#9ab8ff",
+    atmosphere: "#9fb8ff",
+    cloud: "#dce8ff",
+    terrainScale: 4.8,
+    bandOffset: -0.08,
+    rotationSpeed: -0.031,
+    cloudSpeed: -0.047
+  }
+};
+
+const PLANET_VERTEX_SHADER = `
+  varying vec3 vObjectPosition;
+  varying vec3 vWorldNormal;
+  varying vec3 vViewDirection;
+
+  void main() {
+    vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+
+    vObjectPosition = normalize(position);
+    vWorldNormal = normalize(mat3(modelMatrix) * normal);
+    vViewDirection = cameraPosition - worldPosition.xyz;
+
+    gl_Position = projectionMatrix * viewMatrix * worldPosition;
+  }
+`;
+
+const PLANET_NOISE_SHADER = `
+  float hash(vec3 p) {
+    p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
+    p *= 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+  }
+
+  float noise(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+
+    return mix(
+      mix(
+        mix(hash(i + vec3(0.0, 0.0, 0.0)), hash(i + vec3(1.0, 0.0, 0.0)), f.x),
+        mix(hash(i + vec3(0.0, 1.0, 0.0)), hash(i + vec3(1.0, 1.0, 0.0)), f.x),
+        f.y
+      ),
+      mix(
+        mix(hash(i + vec3(0.0, 0.0, 1.0)), hash(i + vec3(1.0, 0.0, 1.0)), f.x),
+        mix(hash(i + vec3(0.0, 1.0, 1.0)), hash(i + vec3(1.0, 1.0, 1.0)), f.x),
+        f.y
+      ),
+      f.z
+    );
+  }
+
+  float fbm(vec3 p) {
+    float value = 0.0;
+    float amplitude = 0.5;
+
+    for (int i = 0; i < 5; i++) {
+      value += noise(p) * amplitude;
+      p *= 2.03;
+      amplitude *= 0.5;
+    }
+
+    return value;
+  }
+`;
+
+const PLANET_SURFACE_FRAGMENT_SHADER = `
+  uniform vec3 uShadowColor;
+  uniform vec3 uBaseColor;
+  uniform vec3 uHighlightColor;
+  uniform vec3 uRidgeColor;
+  uniform vec3 uGlowColor;
+  uniform vec3 uLightDirection;
+  uniform float uTime;
+  uniform float uAudioIntensity;
+  uniform float uTerrainScale;
+  uniform float uBandOffset;
+
+  varying vec3 vObjectPosition;
+  varying vec3 vWorldNormal;
+  varying vec3 vViewDirection;
+
+  ${PLANET_NOISE_SHADER}
+
+  void main() {
+    vec3 normal = normalize(vWorldNormal);
+    vec3 viewDirection = normalize(vViewDirection);
+    vec3 samplePoint = vObjectPosition;
+    vec3 drift = vec3(uTime * 0.012, uTime * 0.004, -uTime * 0.009);
+
+    float continent = fbm(samplePoint * uTerrainScale + drift);
+    float fine = fbm(samplePoint * (uTerrainScale * 4.0) - drift.yzx);
+    float ridges = 1.0 - abs((fine * 2.0) - 1.0);
+    float latitudeBands = sin((samplePoint.y + continent * 0.16 + uBandOffset) * 18.0) * 0.5 + 0.5;
+    float land = smoothstep(0.38, 0.76, continent + latitudeBands * 0.14);
+    float ridgeMask = smoothstep(0.66, 0.95, ridges + land * 0.12);
+
+    vec3 color = mix(uShadowColor, uBaseColor, land);
+    color = mix(color, uHighlightColor, smoothstep(0.72, 0.94, continent + fine * 0.22));
+    color = mix(color, uRidgeColor, ridgeMask * 0.38);
+
+    float diffuse = max(dot(normal, normalize(uLightDirection)), 0.0);
+    float wrap = clamp(dot(normal, normalize(uLightDirection)) * 0.5 + 0.5, 0.0, 1.0);
+    float rim = pow(1.0 - max(dot(normal, viewDirection), 0.0), 2.7);
+    float audioGlow = 0.2 + uAudioIntensity * 0.32;
+
+    color *= 0.16 + diffuse * 0.78 + wrap * 0.24;
+    color += uGlowColor * rim * audioGlow;
+    color += uHighlightColor * ridgeMask * 0.1;
+
+    gl_FragColor = vec4(color, 1.0);
+  }
+`;
+
+const PLANET_CLOUD_FRAGMENT_SHADER = `
+  uniform vec3 uCloudColor;
+  uniform float uTime;
+  uniform float uAudioIntensity;
+  uniform float uTerrainScale;
+  uniform float uBandOffset;
+
+  varying vec3 vObjectPosition;
+  varying vec3 vWorldNormal;
+  varying vec3 vViewDirection;
+
+  ${PLANET_NOISE_SHADER}
+
+  void main() {
+    vec3 normal = normalize(vWorldNormal);
+    vec3 viewDirection = normalize(vViewDirection);
+    vec3 flow = vec3(uTime * 0.018, -uTime * 0.011, uTime * 0.014);
+
+    float broad = fbm(vObjectPosition * (uTerrainScale * 2.2) + flow);
+    float wisps = fbm(vObjectPosition * (uTerrainScale * 8.0) - flow.zxy);
+    float bands = sin((vObjectPosition.y + broad * 0.12 + uBandOffset) * 24.0) * 0.5 + 0.5;
+    float cloud = smoothstep(0.55, 0.82, broad * 0.64 + wisps * 0.26 + bands * 0.14);
+    float rim = pow(1.0 - max(dot(normal, viewDirection), 0.0), 1.6);
+
+    float alpha = cloud * (0.16 + rim * 0.16 + uAudioIntensity * 0.06);
+    gl_FragColor = vec4(uCloudColor, alpha);
+  }
+`;
+
+const PLANET_ATMOSPHERE_FRAGMENT_SHADER = `
+  uniform vec3 uAtmosphereColor;
+  uniform float uTime;
+  uniform float uAudioIntensity;
+
+  varying vec3 vObjectPosition;
+  varying vec3 vWorldNormal;
+  varying vec3 vViewDirection;
+
+  void main() {
+    vec3 normal = normalize(vWorldNormal);
+    vec3 viewDirection = normalize(vViewDirection);
+    float rim = pow(1.0 - max(dot(normal, viewDirection), 0.0), 2.2);
+    float pulse = sin(uTime * 0.9 + vObjectPosition.y * 8.0) * 0.5 + 0.5;
+    float alpha = rim * (0.32 + uAudioIntensity * 0.18) + pulse * rim * 0.04;
+
+    gl_FragColor = vec4(uAtmosphereColor, alpha);
+  }
+`;
 
 function piecesFromFen(fen: string): ScenePiece[] {
   const chess = new Chess(fen);
@@ -366,33 +565,121 @@ function WaterPlane({ audioIntensity }: { audioIntensity: number }) {
 
 function Planet({
   position,
-  color,
+  palette,
   scale,
   audioIntensity
 }: {
   position: [number, number, number];
-  color: string;
+  palette: PlanetPalette;
   scale: number;
   audioIntensity: number;
 }) {
-  const ref = useRef<Mesh | null>(null);
+  const groupRef = useRef<Group | null>(null);
+  const cloudRef = useRef<Mesh | null>(null);
+  const surfaceMaterialRef = useRef<ShaderMaterial | null>(null);
+  const cloudMaterialRef = useRef<ShaderMaterial | null>(null);
+  const atmosphereMaterialRef = useRef<ShaderMaterial | null>(null);
+  const surfaceUniforms = useMemo(
+    () => ({
+      uAudioIntensity: { value: 0 },
+      uBandOffset: { value: palette.bandOffset },
+      uBaseColor: { value: new ThreeColor(palette.base) },
+      uGlowColor: { value: new ThreeColor(palette.glow) },
+      uHighlightColor: { value: new ThreeColor(palette.highlight) },
+      uLightDirection: { value: PLANET_LIGHT_DIRECTION },
+      uRidgeColor: { value: new ThreeColor(palette.ridge) },
+      uShadowColor: { value: new ThreeColor(palette.shadow) },
+      uTerrainScale: { value: palette.terrainScale },
+      uTime: { value: 0 }
+    }),
+    [palette]
+  );
+  const cloudUniforms = useMemo(
+    () => ({
+      uAudioIntensity: { value: 0 },
+      uBandOffset: { value: palette.bandOffset },
+      uCloudColor: { value: new ThreeColor(palette.cloud) },
+      uTerrainScale: { value: palette.terrainScale },
+      uTime: { value: 0 }
+    }),
+    [palette]
+  );
+  const atmosphereUniforms = useMemo(
+    () => ({
+      uAtmosphereColor: { value: new ThreeColor(palette.atmosphere) },
+      uAudioIntensity: { value: 0 },
+      uTime: { value: 0 }
+    }),
+    [palette]
+  );
 
   useFrame(({ clock }) => {
-    if (ref.current) {
-      ref.current.rotation.y = clock.elapsedTime * 0.04;
-      ref.current.scale.setScalar(scale + audioIntensity * 0.16);
+    const time = clock.elapsedTime;
+    const activeScale = scale + audioIntensity * 0.16;
+
+    if (groupRef.current) {
+      groupRef.current.rotation.y = time * palette.rotationSpeed;
+      groupRef.current.rotation.z = Math.sin(time * 0.08) * 0.025;
+      groupRef.current.scale.setScalar(activeScale);
+    }
+
+    if (cloudRef.current) {
+      cloudRef.current.rotation.y = time * palette.cloudSpeed;
+      cloudRef.current.rotation.x = Math.sin(time * 0.05) * 0.06;
+    }
+
+    if (surfaceMaterialRef.current) {
+      surfaceMaterialRef.current.uniforms.uAudioIntensity.value = audioIntensity;
+      surfaceMaterialRef.current.uniforms.uTime.value = time;
+    }
+
+    if (cloudMaterialRef.current) {
+      cloudMaterialRef.current.uniforms.uAudioIntensity.value = audioIntensity;
+      cloudMaterialRef.current.uniforms.uTime.value = time;
+    }
+
+    if (atmosphereMaterialRef.current) {
+      atmosphereMaterialRef.current.uniforms.uAudioIntensity.value = audioIntensity;
+      atmosphereMaterialRef.current.uniforms.uTime.value = time;
     }
   });
 
   return (
-    <mesh ref={ref} position={position}>
-      <sphereGeometry args={[1, 48, 24]} />
-      <meshBasicMaterial
-        color={color}
-        opacity={0.42}
-        transparent
-      />
-    </mesh>
+    <group ref={groupRef} position={position} scale={scale}>
+      <mesh renderOrder={1} rotation={[0.08, 0.18, -0.05]}>
+        <sphereGeometry args={[1, 96, 48]} />
+        <shaderMaterial
+          ref={surfaceMaterialRef}
+          fragmentShader={PLANET_SURFACE_FRAGMENT_SHADER}
+          uniforms={surfaceUniforms}
+          vertexShader={PLANET_VERTEX_SHADER}
+        />
+      </mesh>
+      <mesh ref={cloudRef} renderOrder={2} scale={1.018}>
+        <sphereGeometry args={[1, 96, 48]} />
+        <shaderMaterial
+          ref={cloudMaterialRef}
+          blending={AdditiveBlending}
+          depthWrite={false}
+          fragmentShader={PLANET_CLOUD_FRAGMENT_SHADER}
+          transparent
+          uniforms={cloudUniforms}
+          vertexShader={PLANET_VERTEX_SHADER}
+        />
+      </mesh>
+      <mesh renderOrder={3} scale={1.15}>
+        <sphereGeometry args={[1, 96, 48]} />
+        <shaderMaterial
+          ref={atmosphereMaterialRef}
+          blending={AdditiveBlending}
+          depthWrite={false}
+          fragmentShader={PLANET_ATMOSPHERE_FRAGMENT_SHADER}
+          transparent
+          uniforms={atmosphereUniforms}
+          vertexShader={PLANET_VERTEX_SHADER}
+        />
+      </mesh>
+    </group>
   );
 }
 
@@ -419,15 +706,15 @@ function SceneContent(props: ElysiumSceneProps) {
       />
       <Planet
         audioIntensity={props.audioIntensity}
-        color="#f2a45e"
-        position={[-5.2, 4.5, -9.5]}
-        scale={3.2}
+        palette={PLANET_PALETTES.ember}
+        position={[-6.8, 1.1, -11.5]}
+        scale={2.45}
       />
       <Planet
         audioIntensity={props.audioIntensity}
-        color="#91aaff"
-        position={[5.2, 3.7, -10.2]}
-        scale={1.85}
+        palette={PLANET_PALETTES.azure}
+        position={[-1, 1, -11]}
+        scale={1.35}
       />
       <WaterPlane audioIntensity={props.audioIntensity} />
       <Board
