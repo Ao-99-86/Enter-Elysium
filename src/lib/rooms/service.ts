@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { Chess, type Move, type PieceSymbol, type Square } from "chess.js";
+import { chooseGreedyAiMove } from "./ai";
 import { RoomError } from "./errors";
 import type {
   GameResult,
@@ -81,9 +82,12 @@ function classifyGame(chess: Chess): Pick<Room, "status" | "result" | "winner"> 
 
 function publicRoom(room: Room, playerToken?: string): PublicRoom {
   const chess = new Chess(room.fen);
+  const mode = room.mode ?? "multiplayer";
 
   return {
     id: room.id,
+    mode,
+    aiColor: room.aiColor,
     fen: room.fen,
     pgn: room.pgn,
     turn: chessColorToPlayerColor(chess.turn()),
@@ -92,7 +96,7 @@ function publicRoom(room: Room, playerToken?: string): PublicRoom {
     winner: room.winner,
     players: {
       white: true,
-      black: Boolean(room.blackToken)
+      black: mode === "single-player" ? room.aiColor === "black" : Boolean(room.blackToken)
     },
     moves: room.moves,
     lastMove: room.moves.at(-1),
@@ -151,10 +155,54 @@ export async function createRoom(store: RoomStore): Promise<{
     const playerToken = generateToken();
     const room: Room = {
       id: roomId,
+      mode: "multiplayer",
       fen: STARTING_FEN,
       pgn: "",
       whiteToken: playerToken,
       status: "waiting",
+      moves: [],
+      createdAt: now,
+      updatedAt: now,
+      version: 1
+    };
+
+    await store.setRoom(room);
+
+    return {
+      roomId,
+      playerToken,
+      color: "white",
+      room: publicRoom(room, playerToken)
+    };
+  }
+
+  throw new RoomError(503, "room_id_exhausted", "Could not allocate a room code.");
+}
+
+export async function createSinglePlayerRoom(store: RoomStore): Promise<{
+  roomId: string;
+  playerToken: string;
+  color: PlayerColor;
+  room: PublicRoom;
+}> {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const roomId = generateRoomId();
+    const existing = await store.getRoom(roomId);
+
+    if (existing) {
+      continue;
+    }
+
+    const now = Date.now();
+    const playerToken = generateToken();
+    const room: Room = {
+      id: roomId,
+      mode: "single-player",
+      aiColor: "black",
+      fen: STARTING_FEN,
+      pgn: "",
+      whiteToken: playerToken,
+      status: "active",
       moves: [],
       createdAt: now,
       updatedAt: now,
@@ -184,6 +232,11 @@ export async function joinRoom(
   room: PublicRoom;
 }> {
   const room = await requireRoom(store, roomId);
+  const mode = room.mode ?? "multiplayer";
+
+  if (mode === "single-player") {
+    throw new RoomError(409, "single_player_room", "Solo rooms cannot be joined.");
+  }
 
   if (room.blackToken) {
     throw new RoomError(409, "room_full", "Room already has two players.");
@@ -193,6 +246,7 @@ export async function joinRoom(
   const playerToken = generateToken();
   const updated: Room = {
     ...room,
+    mode,
     blackToken: playerToken,
     status: "active",
     updatedAt: now,
@@ -260,16 +314,42 @@ export async function submitMove(
 
   const playedAt = Date.now();
   const gameState = classifyGame(chess);
+  const moveRecords = [toMoveRecord(move, playedAt)];
+  let updatedAt = playedAt;
+  let finalGameState = gameState;
+  const mode = room.mode ?? "multiplayer";
+
+  if (
+    mode === "single-player" &&
+    room.aiColor &&
+    finalGameState.status === "active" &&
+    chessColorToPlayerColor(chess.turn()) === room.aiColor
+  ) {
+    const aiMove = chooseGreedyAiMove(chess);
+
+    if (aiMove) {
+      const appliedAiMove = chess.move({
+        from: aiMove.from,
+        to: aiMove.to,
+        ...(aiMove.promotion ? { promotion: aiMove.promotion } : {})
+      });
+      updatedAt = Date.now();
+      moveRecords.push(toMoveRecord(appliedAiMove, updatedAt));
+      finalGameState = classifyGame(chess);
+    }
+  }
+
   const updated: Room = {
     ...room,
+    mode,
     fen: chess.fen(),
     pgn: chess.pgn(),
-    status: gameState.status,
-    result: gameState.result,
-    winner: gameState.winner,
-    moves: [...room.moves, toMoveRecord(move, playedAt)],
-    updatedAt: playedAt,
-    version: room.version + 1
+    status: finalGameState.status,
+    result: finalGameState.result,
+    winner: finalGameState.winner,
+    moves: [...room.moves, ...moveRecords],
+    updatedAt,
+    version: room.version + moveRecords.length
   };
 
   await store.setRoom(updated);

@@ -440,6 +440,7 @@ function SceneContent(props: ElysiumSceneProps) {
       />
       <OrbitControls
         enableDamping
+        enablePan={false}
         maxDistance={12}
         maxPolarAngle={Math.PI / 2.15}
         minDistance={6}
@@ -459,7 +460,7 @@ export function ElysiumScene(props: ElysiumSceneProps) {
       onCreated={({ camera }) => {
         camera.lookAt(0, 0, 0);
       }}
-      style={{ background: "#07090b" }}
+      style={{ background: "#07090b", touchAction: "none" }}
     >
       <SceneContent {...props} />
     </Canvas>
