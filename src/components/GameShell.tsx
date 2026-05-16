@@ -51,6 +51,60 @@ type RoomActionResponse = {
 type BusyAction = "create" | "solo" | "join" | "move" | "refresh" | null;
 
 const SESSION_KEY = "enter-elysium-session";
+const INVERSION_TURN_SPAN = 3;
+const FIRST_INVERSION_MIN_DELAY = 4;
+const FIRST_INVERSION_DELAY_SPREAD = 4;
+const INVERSION_MIN_DELAY = 7;
+const INVERSION_DELAY_SPREAD = 5;
+
+function hashString(value: string): number {
+  let hash = 2166136261;
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return hash >>> 0;
+}
+
+function deterministicMoveDelay(
+  roomId: string,
+  episode: number,
+  minimum: number,
+  spread: number
+): number {
+  return minimum + (hashString(`${roomId}:${episode}`) % (spread + 1));
+}
+
+function isBoardInversionActive(room: PublicRoom | null): boolean {
+  if (!room || room.status !== "active") {
+    return false;
+  }
+
+  const moveCount = room.moves.length;
+  let episode = 0;
+  let triggerMoveCount = deterministicMoveDelay(
+    room.id,
+    episode,
+    FIRST_INVERSION_MIN_DELAY,
+    FIRST_INVERSION_DELAY_SPREAD
+  );
+
+  while (moveCount >= triggerMoveCount + INVERSION_TURN_SPAN) {
+    episode += 1;
+    triggerMoveCount +=
+      INVERSION_TURN_SPAN +
+      deterministicMoveDelay(
+        room.id,
+        episode,
+        INVERSION_MIN_DELAY,
+        INVERSION_DELAY_SPREAD
+      );
+  }
+
+  return moveCount >= triggerMoveCount;
+}
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -364,6 +418,7 @@ export function GameShell() {
   const [audioIntensity, setAudioIntensity] = useState(0);
 
   const playerColor = room?.playerColor ?? session?.color;
+  const boardInverted = useMemo(() => isBoardInversionActive(room), [room]);
 
   useEffect(() => {
     const queryRoom = new URLSearchParams(window.location.search).get("room");
@@ -618,6 +673,7 @@ export function GameShell() {
       <section className="scene-region" aria-label="Three dimensional chess board">
         <ElysiumScene
           audioIntensity={audioIntensity}
+          boardInverted={boardInverted}
           legalTargets={legalTargets}
           onSquareClick={handleSquareClick}
           playerColor={playerColor}

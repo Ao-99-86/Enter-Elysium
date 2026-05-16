@@ -20,12 +20,15 @@ type ElysiumSceneProps = {
   selectedSquare: Square | null;
   legalTargets: Square[];
   audioIntensity: number;
+  boardInverted: boolean;
   onSquareClick: (square: Square) => void;
 };
 
 const STARTING_FEN = new Chess().fen();
 const FILES = "abcdefgh";
 const PLANET_LIGHT_DIRECTION = new Vector3(-0.45, 0.72, 0.54).normalize();
+const BOARD_INVERSION_RISE = 0.78;
+const BOARD_INVERSION_SECONDS = 5.6;
 
 type PlanetPalette = {
   shadow: string;
@@ -317,6 +320,11 @@ function squarePosition(square: Square, perspective: PlayerColor): [number, numb
   return [fileIndex - 3.5, 0, rankIndex - 3.5];
 }
 
+function smoothStep(value: number): number {
+  const clamped = Math.max(0, Math.min(1, value));
+  return clamped * clamped * (3 - 2 * clamped);
+}
+
 function PieceMaterial({
   color,
   selected = false
@@ -557,6 +565,7 @@ function Board({
   selectedSquare,
   legalTargets,
   audioIntensity,
+  inverted,
   onSquareClick
 }: {
   fen: string;
@@ -564,8 +573,11 @@ function Board({
   selectedSquare: Square | null;
   legalTargets: Square[];
   audioIntensity: number;
+  inverted: boolean;
   onSquareClick: (square: Square) => void;
 }) {
+  const groupRef = useRef<Group | null>(null);
+  const inversionProgressRef = useRef(0);
   const pieces = useMemo(() => piecesFromFen(fen), [fen]);
   const squares = useMemo(
     () =>
@@ -575,8 +587,36 @@ function Board({
     []
   );
 
+  useFrame(({ clock }, delta) => {
+    if (!groupRef.current) {
+      return;
+    }
+
+    const targetProgress = inverted ? 1 : 0;
+    const step = delta / BOARD_INVERSION_SECONDS;
+
+    if (inversionProgressRef.current < targetProgress) {
+      inversionProgressRef.current = Math.min(
+        targetProgress,
+        inversionProgressRef.current + step
+      );
+    } else if (inversionProgressRef.current > targetProgress) {
+      inversionProgressRef.current = Math.max(
+        targetProgress,
+        inversionProgressRef.current - step
+      );
+    }
+
+    const eased = smoothStep(inversionProgressRef.current);
+    const breath = Math.sin(clock.elapsedTime * 0.42) * 0.026;
+
+    groupRef.current.position.y = breath + eased * BOARD_INVERSION_RISE;
+    groupRef.current.rotation.y = eased * Math.PI;
+    groupRef.current.rotation.z = Math.sin(clock.elapsedTime * 0.28) * 0.018 * eased;
+  });
+
   return (
-    <group>
+    <group ref={groupRef}>
       <mesh position={[0, -0.08, 0]}>
         <boxGeometry args={[8.5, 0.12, 8.5]} />
         <meshBasicMaterial color="#593018" />
@@ -831,6 +871,7 @@ function SceneContent(props: ElysiumSceneProps) {
         legalTargets={props.legalTargets}
         onSquareClick={props.onSquareClick}
         perspective={perspective}
+        inverted={props.boardInverted}
         selectedSquare={props.selectedSquare}
       />
       <ResponsiveCamera />
