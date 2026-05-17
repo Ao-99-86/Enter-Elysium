@@ -8,3 +8,9 @@ coverage
 .vercel
 tsconfig.tsbuildinfo
 npm-debug.log*
+
+# Local screenshots and browser verification artifacts
+.playwright-mcp/
+[Ss]creenshots/
+*[Ss]creenshot*
+*[Ss]creen [Ss]hot*
