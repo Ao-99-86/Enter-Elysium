@@ -24,6 +24,7 @@ import {
   useRef,
   useState
 } from "react";
+import type { SceneMoveAnimation } from "./ElysiumScene";
 import type { PlayerColor, PublicRoom, RoomMode } from "@/lib/rooms/types";
 
 const ElysiumScene = dynamic(
@@ -56,6 +57,8 @@ const FIRST_INVERSION_MIN_DELAY = 4;
 const FIRST_INVERSION_DELAY_SPREAD = 4;
 const INVERSION_MIN_DELAY = 7;
 const INVERSION_DELAY_SPREAD = 5;
+const MOVE_PHASE_MS = 820;
+const TILE_SETTLE_MS = 280;
 
 function hashString(value: string): number {
   let hash = 2166136261;
@@ -75,6 +78,12 @@ function deterministicMoveDelay(
   spread: number
 ): number {
   return minimum + (hashString(`${roomId}:${episode}`) % (spread + 1));
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
 }
 
 function isBoardInversionActive(room: PublicRoom | null): boolean {
@@ -416,9 +425,22 @@ export function GameShell() {
   const [busy, setBusy] = useState<BusyAction>(null);
   const [error, setError] = useState<string | null>(null);
   const [audioIntensity, setAudioIntensity] = useState(0);
+  const [displayFen, setDisplayFen] = useState<string | null>(null);
+  const [heldLegalTargets, setHeldLegalTargets] = useState<Square[]>([]);
+  const [moveAnimation, setMoveAnimation] = useState<SceneMoveAnimation | null>(null);
+  const animationLockRef = useRef(false);
+  const animationRunRef = useRef(0);
 
   const playerColor = room?.playerColor ?? session?.color;
   const boardInverted = useMemo(() => isBoardInversionActive(room), [room]);
+
+  const cancelMoveAnimation = useCallback(() => {
+    animationRunRef.current += 1;
+    animationLockRef.current = false;
+    setDisplayFen(null);
+    setHeldLegalTargets([]);
+    setMoveAnimation(null);
+  }, []);
 
   useEffect(() => {
     const queryRoom = new URLSearchParams(window.location.search).get("room");
@@ -451,7 +473,11 @@ export function GameShell() {
           return;
         }
 
-        setRoom(refreshed);
+        if (!animationLockRef.current) {
+          setRoom(refreshed);
+          setDisplayFen(null);
+        }
+
         if (refreshed.mode === "single-player") {
           setJoinCode("");
         }
@@ -502,6 +528,7 @@ export function GameShell() {
       return [];
     }
   }, [room, selectedSquare]);
+  const sceneLegalTargets = heldLegalTargets.length > 0 ? heldLegalTargets : legalTargets;
 
   const canMove =
     Boolean(room && playerColor) &&
@@ -510,6 +537,7 @@ export function GameShell() {
     busy !== "move";
 
   const createNewRoom = useCallback(async () => {
+    cancelMoveAnimation();
     setBusy("create");
     setError(null);
 
@@ -533,9 +561,10 @@ export function GameShell() {
     } finally {
       setBusy(null);
     }
-  }, []);
+  }, [cancelMoveAnimation]);
 
   const createSoloRoom = useCallback(async () => {
+    cancelMoveAnimation();
     setBusy("solo");
     setError(null);
 
@@ -559,7 +588,7 @@ export function GameShell() {
     } finally {
       setBusy(null);
     }
-  }, []);
+  }, [cancelMoveAnimation]);
 
   const joinExistingRoom = useCallback(
     async (event?: FormEvent) => {
@@ -571,6 +600,7 @@ export function GameShell() {
         return;
       }
 
+      cancelMoveAnimation();
       setBusy("join");
       setError(null);
 
@@ -595,17 +625,27 @@ export function GameShell() {
         setBusy(null);
       }
     },
-    [joinCode]
+    [cancelMoveAnimation, joinCode]
   );
 
   const submitMove = useCallback(
-    async (from: Square, to: Square) => {
+    async (from: Square, to: Square, targets: Square[]) => {
       if (!room || !session) {
         return;
       }
 
+      const runId = animationRunRef.current + 1;
+      const startingFen = room.fen;
+      const previousMoveCount = room.moves.length;
+
+      animationRunRef.current = runId;
+      animationLockRef.current = true;
       setBusy("move");
       setError(null);
+      setDisplayFen(startingFen);
+      setHeldLegalTargets(targets);
+
+      const isActiveRun = () => animationRunRef.current === runId;
 
       try {
         const updated = await api<PublicRoom>(`/api/rooms/${room.id}/move`, {
@@ -616,12 +656,63 @@ export function GameShell() {
           }),
           method: "POST"
         });
+        const confirmedMoves = updated.moves.slice(previousMoveCount);
+
+        if (confirmedMoves.length === 0) {
+          setRoom(updated);
+          setDisplayFen(null);
+          setHeldLegalTargets([]);
+          setSelectedSquare(null);
+          return;
+        }
+
+        for (let index = 0; index < confirmedMoves.length; index += 1) {
+          const move = confirmedMoves[index];
+
+          if (!isActiveRun()) {
+            return;
+          }
+
+          setMoveAnimation({
+            color: move.color,
+            from: move.from,
+            id: `${updated.id}-${move.playedAt}-${move.lan}-${index}`,
+            piece: move.piece,
+            to: move.to
+          });
+
+          await wait(MOVE_PHASE_MS);
+
+          if (!isActiveRun()) {
+            return;
+          }
+
+          setMoveAnimation(null);
+          setDisplayFen(move.fen);
+
+          if (index === 0) {
+            setSelectedSquare(null);
+            setHeldLegalTargets([]);
+            await wait(TILE_SETTLE_MS);
+          }
+        }
+
+        if (!isActiveRun()) {
+          return;
+        }
+
         setRoom(updated);
-        setSelectedSquare(null);
+        setDisplayFen(null);
       } catch (moveError) {
         setError(moveError instanceof Error ? moveError.message : "Move failed.");
+        setDisplayFen(null);
+        setHeldLegalTargets([]);
+        setMoveAnimation(null);
       } finally {
-        setBusy(null);
+        if (isActiveRun()) {
+          animationLockRef.current = false;
+          setBusy(null);
+        }
       }
     },
     [room, session]
@@ -634,7 +725,7 @@ export function GameShell() {
       }
 
       if (selectedSquare && legalTargets.includes(square)) {
-        submitMove(selectedSquare, square);
+        submitMove(selectedSquare, square, legalTargets);
         return;
       }
 
@@ -661,12 +752,13 @@ export function GameShell() {
   }, [room]);
 
   const leaveRoom = useCallback(() => {
+    cancelMoveAnimation();
     clearStoredSession();
     setSession(null);
     setRoom(null);
     setSelectedSquare(null);
     setError(null);
-  }, []);
+  }, [cancelMoveAnimation]);
 
   return (
     <main className="app-shell">
@@ -674,7 +766,9 @@ export function GameShell() {
         <ElysiumScene
           audioIntensity={audioIntensity}
           boardInverted={boardInverted}
-          legalTargets={legalTargets}
+          displayFen={displayFen ?? undefined}
+          legalTargets={sceneLegalTargets}
+          moveAnimation={moveAnimation}
           onSquareClick={handleSquareClick}
           playerColor={playerColor}
           room={room}
