@@ -463,29 +463,27 @@ function applyPhaseMaterial(group: Group, opacity: number, emissiveIntensity: nu
 
 function PieceMaterial({
   color,
-  selected = false,
   phase = false
 }: {
   color: Color;
-  selected?: boolean;
   phase?: boolean;
 }) {
   const palette =
     color === "w"
       ? {
           color: "#f0a63b",
-          emissive: selected ? "#ffd890" : "#5f2f0d"
+          emissive: "#5f2f0d"
         }
       : {
           color: "#d9e5ff",
-          emissive: selected ? "#c3d5ff" : "#344168"
+          emissive: "#344168"
         };
 
   return (
     <meshStandardMaterial
       color={palette.color}
       emissive={palette.emissive}
-      emissiveIntensity={selected ? 1.1 : 0.55}
+      emissiveIntensity={0.55}
       metalness={0.72}
       opacity={phase ? 0 : 1}
       roughness={0.22}
@@ -496,12 +494,10 @@ function PieceMaterial({
 
 function BasePiece({
   color,
-  selected,
   phase = false,
   children
 }: {
   color: Color;
-  selected: boolean;
   phase?: boolean;
   children: React.ReactNode;
 }) {
@@ -509,11 +505,11 @@ function BasePiece({
     <>
       <mesh position={[0, 0.08, 0]}>
         <cylinderGeometry args={[0.42, 0.5, 0.16, 40]} />
-        <PieceMaterial color={color} phase={phase} selected={selected} />
+        <PieceMaterial color={color} phase={phase} />
       </mesh>
       <mesh position={[0, 0.24, 0]}>
         <cylinderGeometry args={[0.24, 0.32, 0.22, 36]} />
-        <PieceMaterial color={color} phase={phase} selected={selected} />
+        <PieceMaterial color={color} phase={phase} />
       </mesh>
       {children}
     </>
@@ -523,20 +519,18 @@ function BasePiece({
 function PieceShape({
   type,
   color,
-  selected,
   phase = false
 }: {
   type: PieceSymbol;
   color: Color;
-  selected: boolean;
   phase?: boolean;
 }) {
   if (type === "p") {
     return (
-      <BasePiece color={color} phase={phase} selected={selected}>
+      <BasePiece color={color} phase={phase}>
         <mesh position={[0, 0.52, 0]}>
           <sphereGeometry args={[0.24, 20, 14]} />
-          <PieceMaterial color={color} phase={phase} selected={selected} />
+          <PieceMaterial color={color} phase={phase} />
         </mesh>
       </BasePiece>
     );
@@ -544,16 +538,16 @@ function PieceShape({
 
   if (type === "r") {
     return (
-      <BasePiece color={color} phase={phase} selected={selected}>
+      <BasePiece color={color} phase={phase}>
         <mesh position={[0, 0.55, 0]}>
           <cylinderGeometry args={[0.31, 0.25, 0.38, 28]} />
-          <PieceMaterial color={color} phase={phase} selected={selected} />
+          <PieceMaterial color={color} phase={phase} />
         </mesh>
         {[-0.18, 0.18].map((x) =>
           [-0.18, 0.18].map((z) => (
             <mesh key={`${x}-${z}`} position={[x, 0.8, z]}>
               <boxGeometry args={[0.14, 0.16, 0.14]} />
-              <PieceMaterial color={color} phase={phase} selected={selected} />
+              <PieceMaterial color={color} phase={phase} />
             </mesh>
           ))
         )}
@@ -563,14 +557,14 @@ function PieceShape({
 
   if (type === "n") {
     return (
-      <BasePiece color={color} phase={phase} selected={selected}>
+      <BasePiece color={color} phase={phase}>
         <mesh position={[0, 0.57, -0.03]} rotation={[0.35, 0.2, -0.15]}>
           <coneGeometry args={[0.31, 0.58, 5]} />
-          <PieceMaterial color={color} phase={phase} selected={selected} />
+          <PieceMaterial color={color} phase={phase} />
         </mesh>
         <mesh position={[0.07, 0.78, -0.22]} rotation={[0.1, 0, 0.3]}>
           <boxGeometry args={[0.22, 0.16, 0.32]} />
-          <PieceMaterial color={color} phase={phase} selected={selected} />
+          <PieceMaterial color={color} phase={phase} />
         </mesh>
       </BasePiece>
     );
@@ -578,14 +572,14 @@ function PieceShape({
 
   if (type === "b") {
     return (
-      <BasePiece color={color} phase={phase} selected={selected}>
+      <BasePiece color={color} phase={phase}>
         <mesh position={[0, 0.58, 0]}>
           <coneGeometry args={[0.28, 0.62, 36]} />
-          <PieceMaterial color={color} phase={phase} selected={selected} />
+          <PieceMaterial color={color} phase={phase} />
         </mesh>
         <mesh position={[0, 0.91, 0]}>
           <sphereGeometry args={[0.1, 16, 10]} />
-          <PieceMaterial color={color} phase={phase} selected={selected} />
+          <PieceMaterial color={color} phase={phase} />
         </mesh>
       </BasePiece>
     );
@@ -593,15 +587,15 @@ function PieceShape({
 
   if (type === "q") {
     return (
-      <BasePiece color={color} phase={phase} selected={selected}>
+      <BasePiece color={color} phase={phase}>
         <mesh position={[0, 0.57, 0]}>
           <cylinderGeometry args={[0.2, 0.28, 0.48, 36]} />
-          <PieceMaterial color={color} phase={phase} selected={selected} />
+          <PieceMaterial color={color} phase={phase} />
         </mesh>
         {[-0.25, -0.12, 0, 0.12, 0.25].map((x, index) => (
           <mesh key={x} position={[x, 0.9 + (index === 2 ? 0.07 : 0), 0]}>
             <sphereGeometry args={[index === 2 ? 0.11 : 0.08, 14, 10]} />
-            <PieceMaterial color={color} phase={phase} selected={selected} />
+            <PieceMaterial color={color} phase={phase} />
           </mesh>
         ))}
       </BasePiece>
@@ -609,18 +603,18 @@ function PieceShape({
   }
 
   return (
-    <BasePiece color={color} phase={phase} selected={selected}>
+    <BasePiece color={color} phase={phase}>
       <mesh position={[0, 0.57, 0]}>
         <cylinderGeometry args={[0.22, 0.3, 0.52, 36]} />
-        <PieceMaterial color={color} phase={phase} selected={selected} />
+        <PieceMaterial color={color} phase={phase} />
       </mesh>
       <mesh position={[0, 0.94, 0]}>
         <boxGeometry args={[0.12, 0.36, 0.08]} />
-        <PieceMaterial color={color} phase={phase} selected={selected} />
+        <PieceMaterial color={color} phase={phase} />
       </mesh>
       <mesh position={[0, 0.98, 0]}>
         <boxGeometry args={[0.34, 0.08, 0.08]} />
-        <PieceMaterial color={color} phase={phase} selected={selected} />
+        <PieceMaterial color={color} phase={phase} />
       </mesh>
     </BasePiece>
   );
@@ -654,7 +648,7 @@ function ChessPiece({
 
     groupRef.current.position.y =
       0.09 +
-      liftRef.current * SELECTED_PIECE_LIFT +
+      liftRef.current * TARGET_TILE_LIFT +
       Math.sin(clock.elapsedTime * 1.35 + x + z) * 0.018 +
       audioIntensity * 0.06;
     groupRef.current.rotation.y = selected
@@ -672,7 +666,7 @@ function ChessPiece({
       position={[x, 0.09, z]}
       scale={0.86}
     >
-      <PieceShape color={piece.color} selected={selected} type={piece.type} />
+      <PieceShape color={piece.color} type={piece.type} />
     </group>
   );
 }
@@ -730,7 +724,7 @@ function PhaseMovePiece({
 
   return (
     <group ref={groupRef} position={[fromX, 0.09 + SELECTED_PIECE_LIFT, fromZ]} scale={0.86}>
-      <PieceShape color={color} phase selected type={animation.piece} />
+      <PieceShape color={color} phase type={animation.piece} />
     </group>
   );
 }
@@ -754,6 +748,21 @@ function BoardSquare({
   const file = FILES.indexOf(square[0]);
   const rank = Number(square[1]);
   const light = (file + rank) % 2 === 0;
+  const raised = selected || target;
+
+  useFrame(({ clock }, delta) => {
+    if (!meshRef.current) {
+      return;
+    }
+
+    const targetLift = raised ? 1 : 0;
+    liftRef.current +=
+      (targetLift - liftRef.current) * Math.min(1, delta * (raised ? 7.5 : 5.25));
+
+    meshRef.current.position.y =
+      liftRef.current * TARGET_TILE_LIFT +
+      Math.sin(clock.elapsedTime * 2.6 + x * 0.73 + z * 0.91) * 0.028 * liftRef.current;
+  });
 
   useFrame(({ clock }, delta) => {
     if (!meshRef.current) {
