@@ -46,10 +46,10 @@ export type SceneMoveAnimation = {
 const STARTING_FEN = new Chess().fen();
 const FILES = "abcdefgh";
 const PLANET_LIGHT_DIRECTION = new Vector3(-0.45, 0.72, 0.54).normalize();
-const PLANET_ENGULF_SCALE = 9.5;
-const INTERIOR_SURFACE_RADIUS = 16;
-const INTERIOR_AURORA_RADIUS = 15.6;
-const INTERIOR_HAZE_RADIUS = 15.2;
+const PLANET_ENGULF_SCALE = 14;
+const INTERIOR_SURFACE_RADIUS = 19;
+const INTERIOR_AURORA_RADIUS = 18.5;
+const INTERIOR_HAZE_RADIUS = 18;
 const INTERIOR_PALETTE = {
   shadow: "#2a140d",
   ember: "#c0672d",
@@ -1273,7 +1273,7 @@ function Planet({
     const t = smoothStep(progress);
     const baseScale = scale + audioIntensity * 0.16;
     const activeScale = lerp(baseScale, engulfScale, t);
-    const shellFade = 1 - smoothStep((progress - 0.8) / 0.18);
+    const shellFade = 1 - smoothStep((progress - 0.55) / 0.25);
 
     if (groupRef.current) {
       groupRef.current.rotation.y = time * palette.rotationSpeed;
