@@ -9,6 +9,8 @@ import {
   DoorOpen,
   Gamepad2,
   LogIn,
+  Maximize2,
+  Minimize2,
   MousePointer2,
   Plus,
   RotateCw,
@@ -52,6 +54,50 @@ type RoomActionResponse = {
 type BusyAction = "create" | "solo" | "join" | "move" | "refresh" | null;
 
 const SESSION_KEY = "enter-elysium-session";
+const FOCUS_MEDIA_QUERY = "(max-width: 980px)";
+
+type OrientationLockable = ScreenOrientation & {
+  lock?: (orientation: "landscape" | "portrait" | "any") => Promise<void>;
+  unlock?: () => void;
+};
+
+function isMobileLayout(): boolean {
+  if (typeof window === "undefined" || !window.matchMedia) {
+    return false;
+  }
+
+  return window.matchMedia(FOCUS_MEDIA_QUERY).matches;
+}
+
+function requestImmersiveDisplay(): void {
+  const root =
+    typeof document !== "undefined" ? document.documentElement : null;
+
+  if (root?.requestFullscreen && !document.fullscreenElement) {
+    root.requestFullscreen().catch(() => {});
+  }
+
+  const orientation = window.screen?.orientation as
+    | OrientationLockable
+    | undefined;
+  orientation?.lock?.("landscape").catch(() => {});
+}
+
+function releaseImmersiveDisplay(): void {
+  if (typeof document === "undefined") {
+    return;
+  }
+
+  if (document.fullscreenElement && document.exitFullscreen) {
+    document.exitFullscreen().catch(() => {});
+  }
+
+  const orientation = window.screen?.orientation as
+    | OrientationLockable
+    | undefined;
+  orientation?.unlock?.();
+}
+
 const INVERSION_TURN_SPAN = 3;
 const FIRST_INVERSION_MIN_DELAY = 4;
 const FIRST_INVERSION_DELAY_SPREAD = 4;
@@ -471,8 +517,44 @@ export function GameShell() {
   const [displayFen, setDisplayFen] = useState<string | null>(null);
   const [heldLegalTargets, setHeldLegalTargets] = useState<Square[]>([]);
   const [moveAnimation, setMoveAnimation] = useState<SceneMoveAnimation | null>(null);
+  const [focusMode, setFocusMode] = useState(false);
   const animationLockRef = useRef(false);
   const animationRunRef = useRef(0);
+
+  const enterFocusMode = useCallback(() => {
+    setFocusMode(true);
+    requestImmersiveDisplay();
+  }, []);
+
+  const exitFocusMode = useCallback(() => {
+    setFocusMode(false);
+    releaseImmersiveDisplay();
+  }, []);
+
+  const toggleFocusMode = useCallback(() => {
+    setFocusMode((current) => {
+      if (current) {
+        releaseImmersiveDisplay();
+        return false;
+      }
+
+      requestImmersiveDisplay();
+      return true;
+    });
+  }, []);
+
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      if (!document.fullscreenElement) {
+        setFocusMode(false);
+      }
+    };
+
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+    };
+  }, []);
 
   const playerColor = room?.playerColor ?? session?.color;
   const boardInverted = useMemo(() => isBoardInversionActive(room), [room]);
@@ -582,6 +664,9 @@ export function GameShell() {
 
   const createNewRoom = useCallback(async () => {
     cancelMoveAnimation();
+    if (isMobileLayout()) {
+      enterFocusMode();
+    }
     setBusy("create");
     setError(null);
 
@@ -605,10 +690,13 @@ export function GameShell() {
     } finally {
       setBusy(null);
     }
-  }, [cancelMoveAnimation]);
+  }, [cancelMoveAnimation, enterFocusMode]);
 
   const createSoloRoom = useCallback(async () => {
     cancelMoveAnimation();
+    if (isMobileLayout()) {
+      enterFocusMode();
+    }
     setBusy("solo");
     setError(null);
 
@@ -632,7 +720,7 @@ export function GameShell() {
     } finally {
       setBusy(null);
     }
-  }, [cancelMoveAnimation]);
+  }, [cancelMoveAnimation, enterFocusMode]);
 
   const joinExistingRoom = useCallback(
     async (event?: FormEvent) => {
@@ -645,6 +733,9 @@ export function GameShell() {
       }
 
       cancelMoveAnimation();
+      if (isMobileLayout()) {
+        enterFocusMode();
+      }
       setBusy("join");
       setError(null);
 
@@ -669,7 +760,7 @@ export function GameShell() {
         setBusy(null);
       }
     },
-    [cancelMoveAnimation, joinCode]
+    [cancelMoveAnimation, enterFocusMode, joinCode]
   );
 
   const submitMove = useCallback(
@@ -797,15 +888,16 @@ export function GameShell() {
 
   const leaveRoom = useCallback(() => {
     cancelMoveAnimation();
+    exitFocusMode();
     clearStoredSession();
     setSession(null);
     setRoom(null);
     setSelectedSquare(null);
     setError(null);
-  }, [cancelMoveAnimation]);
+  }, [cancelMoveAnimation, exitFocusMode]);
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell${focusMode ? " focus-mode" : ""}`}>
       <section className="scene-region" aria-label="Three dimensional chess board">
         <ElysiumScene
           audioIntensity={audioIntensity}
@@ -819,6 +911,21 @@ export function GameShell() {
           room={room}
           selectedSquare={selectedSquare}
         />
+        {focusMode ? (
+          <button
+            aria-label="Exit focus mode"
+            className="focus-exit"
+            onClick={exitFocusMode}
+            title="Exit focus mode"
+            type="button"
+          >
+            <Minimize2 size={18} />
+          </button>
+        ) : null}
+        <div className="rotate-hint" role="status">
+          <Smartphone size={18} />
+          <span>Rotate your device to landscape for the best view.</span>
+        </div>
       </section>
       <aside className="side-panel">
         <div className="brand-block">
@@ -862,7 +969,17 @@ export function GameShell() {
             </button>
           </div>
 
-          <div className="button-row single-action">
+          <div className="button-row">
+            <button
+              className="secondary-button"
+              disabled={!room}
+              onClick={toggleFocusMode}
+              title={focusMode ? "Exit focus mode" : "Focus mode hides the panel and fills the screen"}
+              type="button"
+            >
+              {focusMode ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
+              {focusMode ? "Exit focus" : "Focus mode"}
+            </button>
             <button
               className="secondary-button"
               disabled={!room || Boolean(busy)}
