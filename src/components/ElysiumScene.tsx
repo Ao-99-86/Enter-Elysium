@@ -4,12 +4,14 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, Sparkles, Stars } from "@react-three/drei";
 import { Chess, type Color, type PieceSymbol, type Square } from "chess.js";
 import { useEffect, useMemo, useRef } from "react";
-import { AdditiveBlending, Color as ThreeColor, Fog, Vector3 } from "three";
+import { AdditiveBlending, BackSide, Color as ThreeColor, Fog, Vector3 } from "three";
 import type {
+  AmbientLight,
   Group,
   Mesh,
   MeshStandardMaterial,
   PerspectiveCamera,
+  PointLight,
   ShaderMaterial
 } from "three";
 import type { PlayerColor, PublicRoom } from "@/lib/rooms/types";
@@ -44,6 +46,21 @@ export type SceneMoveAnimation = {
 const STARTING_FEN = new Chess().fen();
 const FILES = "abcdefgh";
 const PLANET_LIGHT_DIRECTION = new Vector3(-0.45, 0.72, 0.54).normalize();
+const PLANET_ENGULF_SCALE = 9.5;
+const INTERIOR_SURFACE_RADIUS = 16;
+const INTERIOR_AURORA_RADIUS = 15.6;
+const INTERIOR_HAZE_RADIUS = 15.2;
+const INTERIOR_PALETTE = {
+  shadow: "#2a140d",
+  ember: "#c0672d",
+  highlight: "#ffd38a",
+  auroraA: "#7a4cc8",
+  auroraB: "#f0a63b",
+  coreGlow: "#fff1c4",
+  fog: "#1a0a06"
+} as const;
+
+type EngulfProgressRef = { current: number };
 const BOARD_INVERSION_RISE = 0.78;
 const BOARD_INVERSION_SECONDS = 5.6;
 const BOARD_SURFACE_SECONDS = 24;
@@ -172,6 +189,7 @@ const PLANET_SURFACE_FRAGMENT_SHADER = `
   uniform float uAudioIntensity;
   uniform float uTerrainScale;
   uniform float uBandOffset;
+  uniform float uOpacity;
 
   varying vec3 vObjectPosition;
   varying vec3 vWorldNormal;
@@ -205,7 +223,7 @@ const PLANET_SURFACE_FRAGMENT_SHADER = `
     color += uGlowColor * rim * audioGlow;
     color += uHighlightColor * ridgeMask * 0.1;
 
-    gl_FragColor = vec4(color, 1.0);
+    gl_FragColor = vec4(color, uOpacity);
   }
 `;
 
@@ -215,6 +233,7 @@ const PLANET_CLOUD_FRAGMENT_SHADER = `
   uniform float uAudioIntensity;
   uniform float uTerrainScale;
   uniform float uBandOffset;
+  uniform float uOpacity;
 
   varying vec3 vObjectPosition;
   varying vec3 vWorldNormal;
@@ -234,7 +253,7 @@ const PLANET_CLOUD_FRAGMENT_SHADER = `
     float rim = pow(1.0 - max(dot(normal, viewDirection), 0.0), 1.6);
 
     float alpha = cloud * (0.16 + rim * 0.16 + uAudioIntensity * 0.06);
-    gl_FragColor = vec4(uCloudColor, alpha);
+    gl_FragColor = vec4(uCloudColor, alpha * uOpacity);
   }
 `;
 
@@ -242,6 +261,7 @@ const PLANET_ATMOSPHERE_FRAGMENT_SHADER = `
   uniform vec3 uAtmosphereColor;
   uniform float uTime;
   uniform float uAudioIntensity;
+  uniform float uOpacity;
 
   varying vec3 vObjectPosition;
   varying vec3 vWorldNormal;
@@ -254,7 +274,127 @@ const PLANET_ATMOSPHERE_FRAGMENT_SHADER = `
     float pulse = sin(uTime * 0.9 + vObjectPosition.y * 8.0) * 0.5 + 0.5;
     float alpha = rim * (0.32 + uAudioIntensity * 0.18) + pulse * rim * 0.04;
 
-    gl_FragColor = vec4(uAtmosphereColor, alpha);
+    gl_FragColor = vec4(uAtmosphereColor, alpha * uOpacity);
+  }
+`;
+
+const PLANET_INTERIOR_SURFACE_FRAGMENT_SHADER = `
+  uniform vec3 uShadowColor;
+  uniform vec3 uEmberColor;
+  uniform vec3 uHighlightColor;
+  uniform vec3 uAuroraColorA;
+  uniform vec3 uAuroraColorB;
+  uniform vec3 uCoreGlowColor;
+  uniform float uTime;
+  uniform float uAudioIntensity;
+  uniform float uPulse;
+  uniform float uEngulfProgress;
+  uniform float uOpacity;
+
+  varying vec3 vObjectPosition;
+  varying vec3 vWorldNormal;
+  varying vec3 vViewDirection;
+
+  ${PLANET_NOISE_SHADER}
+
+  void main() {
+    vec3 N = normalize(vWorldNormal);
+    vec3 V = normalize(vViewDirection);
+    vec3 p = vObjectPosition;
+
+    vec3 driftSlow = vec3(uTime * 0.004, uTime * 0.0018, -uTime * 0.0031);
+    float crust = fbm(p * 2.1 + driftSlow);
+    float fineFlow = fbm(p * 5.5 - driftSlow.yzx);
+    float veins = 1.0 - abs(fineFlow * 2.0 - 1.0);
+    vec3 base = mix(uShadowColor, uEmberColor, smoothstep(0.32, 0.78, crust));
+    base = mix(base, uHighlightColor, smoothstep(0.78, 0.96, veins));
+
+    float lat = p.y + fbm(p * 1.4 + vec3(0.0, uTime * 0.02, 0.0)) * 0.35;
+    float ribbon1 = exp(-pow((lat - 0.35) * 4.0, 2.0));
+    float ribbon2 = exp(-pow((lat + 0.20 - sin(uTime * 0.07) * 0.15) * 5.0, 2.0));
+    float ribbonFlow = fbm(p * 3.2 + vec3(uTime * 0.03, 0.0, -uTime * 0.025));
+    float aurora = (ribbon1 * 0.8 + ribbon2 * 0.6) * (0.4 + ribbonFlow * 0.8);
+    vec3 auroraColor = mix(uAuroraColorA, uAuroraColorB, ribbonFlow);
+
+    float breath = 0.92 + 0.08 * cos(uTime * 0.35);
+    float centerward = pow(max(dot(-N, V), 0.0), 1.6);
+    float coreFlash = centerward * (uAudioIntensity * 0.6 + uPulse * 1.4);
+    float innerRim = pow(1.0 - max(dot(N, V), 0.0), 2.2);
+
+    vec3 color = base * (0.35 + breath * 0.25);
+    color += auroraColor * aurora * (0.45 + uAudioIntensity * 0.5) * breath;
+    color += uCoreGlowColor * coreFlash;
+    color += uAuroraColorB * innerRim * 0.18;
+
+    float reveal = smoothstep(0.45, 0.95, uEngulfProgress);
+    gl_FragColor = vec4(color * (0.6 + 0.4 * reveal), uOpacity);
+  }
+`;
+
+const PLANET_INTERIOR_AURORA_FRAGMENT_SHADER = `
+  uniform vec3 uAuroraColorA;
+  uniform vec3 uAuroraColorB;
+  uniform float uTime;
+  uniform float uAudioIntensity;
+  uniform float uPulse;
+  uniform float uOpacity;
+
+  varying vec3 vObjectPosition;
+  varying vec3 vWorldNormal;
+  varying vec3 vViewDirection;
+
+  ${PLANET_NOISE_SHADER}
+
+  void main() {
+    vec3 N = normalize(vWorldNormal);
+    vec3 V = normalize(vViewDirection);
+    vec3 p = vObjectPosition;
+
+    float lat1 = p.y + noise(p * 1.2 + vec3(uTime * 0.018, 0.0, 0.0)) * 0.4;
+    float lat2 = p.y + noise(p * 1.7 - vec3(uTime * 0.012, 0.0, 0.0)) * 0.45;
+    float ribbon1 = exp(-pow((lat1 - 0.18 + sin(uTime * 0.05) * 0.12) * 3.2, 2.0));
+    float ribbon2 = exp(-pow((lat2 + 0.42 - sin(uTime * 0.04) * 0.10) * 3.8, 2.0));
+    float flow = noise(p * 2.6 + vec3(uTime * 0.04, -uTime * 0.025, 0.0));
+    float ribbons = (ribbon1 + ribbon2 * 0.7) * (0.35 + flow * 0.9);
+
+    vec3 color = mix(uAuroraColorA, uAuroraColorB, flow);
+    float audioGain = 0.55 + uAudioIntensity * 0.7 + uPulse * 0.9;
+    float rim = pow(1.0 - max(dot(N, V), 0.0), 1.8);
+    float alpha = ribbons * audioGain * (0.45 + rim * 0.35) * uOpacity;
+    gl_FragColor = vec4(color * audioGain, clamp(alpha, 0.0, 1.0));
+  }
+`;
+
+const PLANET_INTERIOR_HAZE_FRAGMENT_SHADER = `
+  uniform vec3 uAuroraColorA;
+  uniform vec3 uCoreGlowColor;
+  uniform float uTime;
+  uniform float uAudioIntensity;
+  uniform float uPulse;
+  uniform float uOpacity;
+
+  varying vec3 vObjectPosition;
+  varying vec3 vWorldNormal;
+  varying vec3 vViewDirection;
+
+  ${PLANET_NOISE_SHADER}
+
+  void main() {
+    vec3 N = normalize(vWorldNormal);
+    vec3 V = normalize(vViewDirection);
+    vec3 p = vObjectPosition;
+    vec3 drift = vec3(uTime * 0.006, uTime * 0.003, -uTime * 0.004);
+
+    float nebula = fbm(p * 1.6 + drift);
+    float clouds = noise(p * 3.1 - drift.yzx);
+    float density = smoothstep(0.42, 0.92, nebula * 0.7 + clouds * 0.4);
+    float pulse = 0.5 + 0.5 * sin(uTime * 0.22 + nebula * 4.0);
+
+    vec3 color = mix(uAuroraColorA, uCoreGlowColor, density * 0.55);
+    float rim = pow(1.0 - max(dot(N, V), 0.0), 1.4);
+    float gain = 0.32 + uAudioIntensity * 0.4 + uPulse * 0.55;
+    float alpha = density * gain * (0.4 + rim * 0.5 + pulse * 0.12) * uOpacity;
+    gl_FragColor = vec4(color * (0.6 + pulse * 0.3), clamp(alpha, 0.0, 1.0));
   }
 `;
 
@@ -1008,7 +1148,7 @@ function UnderwaterSurface({ audioIntensity }: { audioIntensity: number }) {
   );
 }
 
-function SceneAtmosphere() {
+function SceneAtmosphere({ engulfProgressRef }: { engulfProgressRef: EngulfProgressRef }) {
   const { scene } = useThree();
   const backgroundColorRef = useRef(new ThreeColor("#07090b"));
   const fogRef = useRef<Fog | null>(null);
@@ -1016,7 +1156,9 @@ function SceneAtmosphere() {
     surfaceBackground: new ThreeColor("#07090b"),
     surfaceFog: new ThreeColor("#0a0d0e"),
     underwaterBackground: new ThreeColor("#021d26"),
-    underwaterFog: new ThreeColor("#043540")
+    underwaterFog: new ThreeColor("#043540"),
+    interiorBackground: new ThreeColor(INTERIOR_PALETTE.fog),
+    interiorFog: new ThreeColor(INTERIOR_PALETTE.fog)
   });
 
   useEffect(() => {
@@ -1045,16 +1187,21 @@ function SceneAtmosphere() {
       0,
       Math.min(1, submersion * (0.94 + Math.sin(clock.elapsedTime * 0.72) * 0.06))
     );
+    const interior = smoothStep((engulfProgressRef.current - 0.45) / 0.5);
     const palette = paletteRef.current;
 
     backgroundColorRef.current
       .copy(palette.surfaceBackground)
-      .lerp(palette.underwaterBackground, current);
+      .lerp(palette.underwaterBackground, current)
+      .lerp(palette.interiorBackground, interior);
 
     if (fogRef.current) {
-      fogRef.current.color.copy(palette.surfaceFog).lerp(palette.underwaterFog, current);
+      fogRef.current.color
+        .copy(palette.surfaceFog)
+        .lerp(palette.underwaterFog, current)
+        .lerp(palette.interiorFog, interior);
       fogRef.current.near = 8 - current * 3.2;
-      fogRef.current.far = 28 - current * 8.5;
+      fogRef.current.far = lerp(28 - current * 8.5, 60, interior);
     }
   });
 
@@ -1066,15 +1213,15 @@ function Planet({
   palette,
   scale,
   audioIntensity,
-  engulfActive = false,
+  engulfProgressRef,
   engulfCenter = [0, 0.6, 0],
-  engulfScale = 7
+  engulfScale = PLANET_ENGULF_SCALE
 }: {
   position: [number, number, number];
   palette: PlanetPalette;
   scale: number;
   audioIntensity: number;
-  engulfActive?: boolean;
+  engulfProgressRef?: EngulfProgressRef;
   engulfCenter?: [number, number, number];
   engulfScale?: number;
 }) {
@@ -1083,7 +1230,6 @@ function Planet({
   const surfaceMaterialRef = useRef<ShaderMaterial | null>(null);
   const cloudMaterialRef = useRef<ShaderMaterial | null>(null);
   const atmosphereMaterialRef = useRef<ShaderMaterial | null>(null);
-  const engulfProgressRef = useRef(0);
   const surfaceUniforms = useMemo(
     () => ({
       uAudioIntensity: { value: 0 },
@@ -1092,6 +1238,7 @@ function Planet({
       uGlowColor: { value: new ThreeColor(palette.glow) },
       uHighlightColor: { value: new ThreeColor(palette.highlight) },
       uLightDirection: { value: PLANET_LIGHT_DIRECTION },
+      uOpacity: { value: 1 },
       uRidgeColor: { value: new ThreeColor(palette.ridge) },
       uShadowColor: { value: new ThreeColor(palette.shadow) },
       uTerrainScale: { value: palette.terrainScale },
@@ -1104,6 +1251,7 @@ function Planet({
       uAudioIntensity: { value: 0 },
       uBandOffset: { value: palette.bandOffset },
       uCloudColor: { value: new ThreeColor(palette.cloud) },
+      uOpacity: { value: 1 },
       uTerrainScale: { value: palette.terrainScale },
       uTime: { value: 0 }
     }),
@@ -1113,19 +1261,19 @@ function Planet({
     () => ({
       uAtmosphereColor: { value: new ThreeColor(palette.atmosphere) },
       uAudioIntensity: { value: 0 },
+      uOpacity: { value: 1 },
       uTime: { value: 0 }
     }),
     [palette]
   );
 
-  useFrame(({ clock }, delta) => {
+  useFrame(({ clock }) => {
     const time = clock.elapsedTime;
-    const target = engulfActive ? 1 : 0;
-    engulfProgressRef.current +=
-      (target - engulfProgressRef.current) * Math.min(1, delta * 1.1);
-    const t = smoothStep(engulfProgressRef.current);
+    const progress = engulfProgressRef ? engulfProgressRef.current : 0;
+    const t = smoothStep(progress);
     const baseScale = scale + audioIntensity * 0.16;
     const activeScale = lerp(baseScale, engulfScale, t);
+    const shellFade = 1 - smoothStep((progress - 0.8) / 0.18);
 
     if (groupRef.current) {
       groupRef.current.rotation.y = time * palette.rotationSpeed;
@@ -1144,16 +1292,19 @@ function Planet({
     if (surfaceMaterialRef.current) {
       surfaceMaterialRef.current.uniforms.uAudioIntensity.value = audioIntensity;
       surfaceMaterialRef.current.uniforms.uTime.value = time;
+      surfaceMaterialRef.current.uniforms.uOpacity.value = shellFade;
     }
 
     if (cloudMaterialRef.current) {
       cloudMaterialRef.current.uniforms.uAudioIntensity.value = audioIntensity;
       cloudMaterialRef.current.uniforms.uTime.value = time;
+      cloudMaterialRef.current.uniforms.uOpacity.value = shellFade;
     }
 
     if (atmosphereMaterialRef.current) {
       atmosphereMaterialRef.current.uniforms.uAudioIntensity.value = audioIntensity;
       atmosphereMaterialRef.current.uniforms.uTime.value = time;
+      atmosphereMaterialRef.current.uniforms.uOpacity.value = shellFade;
     }
   });
 
@@ -1164,6 +1315,7 @@ function Planet({
         <shaderMaterial
           ref={surfaceMaterialRef}
           fragmentShader={PLANET_SURFACE_FRAGMENT_SHADER}
+          transparent
           uniforms={surfaceUniforms}
           vertexShader={PLANET_VERTEX_SHADER}
         />
@@ -1196,6 +1348,210 @@ function Planet({
   );
 }
 
+function EngulfCoordinator({
+  active,
+  progressRef
+}: {
+  active: boolean;
+  progressRef: EngulfProgressRef;
+}) {
+  useFrame((_, delta) => {
+    const target = active ? 1 : 0;
+    progressRef.current += (target - progressRef.current) * Math.min(1, delta * 1.1);
+  });
+  return null;
+}
+
+function PlanetInterior({
+  audioIntensity,
+  engulfProgressRef
+}: {
+  audioIntensity: number;
+  engulfProgressRef: EngulfProgressRef;
+}) {
+  const { size } = useThree();
+  const groupRef = useRef<Group | null>(null);
+  const surfaceMaterialRef = useRef<ShaderMaterial | null>(null);
+  const auroraMaterialRef = useRef<ShaderMaterial | null>(null);
+  const hazeMaterialRef = useRef<ShaderMaterial | null>(null);
+  const pulseRef = useRef(0);
+  const pulseThresholdRef = useRef(0.5);
+  const narrow = size.width < 700;
+  const segments = useMemo<[number, number, number]>(
+    () => (narrow ? [1, 96, 48] : [1, 128, 64]),
+    [narrow]
+  );
+  const auroraSegments = useMemo<[number, number, number]>(
+    () => (narrow ? [1, 72, 36] : [1, 96, 48]),
+    [narrow]
+  );
+  const hazeSegments = useMemo<[number, number, number]>(
+    () => (narrow ? [1, 56, 28] : [1, 80, 40]),
+    [narrow]
+  );
+
+  const surfaceUniforms = useMemo(
+    () => ({
+      uAudioIntensity: { value: 0 },
+      uAuroraColorA: { value: new ThreeColor(INTERIOR_PALETTE.auroraA) },
+      uAuroraColorB: { value: new ThreeColor(INTERIOR_PALETTE.auroraB) },
+      uCoreGlowColor: { value: new ThreeColor(INTERIOR_PALETTE.coreGlow) },
+      uEmberColor: { value: new ThreeColor(INTERIOR_PALETTE.ember) },
+      uEngulfProgress: { value: 0 },
+      uHighlightColor: { value: new ThreeColor(INTERIOR_PALETTE.highlight) },
+      uOpacity: { value: 0 },
+      uPulse: { value: 0 },
+      uShadowColor: { value: new ThreeColor(INTERIOR_PALETTE.shadow) },
+      uTime: { value: 0 }
+    }),
+    []
+  );
+  const auroraUniforms = useMemo(
+    () => ({
+      uAudioIntensity: { value: 0 },
+      uAuroraColorA: { value: new ThreeColor(INTERIOR_PALETTE.auroraA) },
+      uAuroraColorB: { value: new ThreeColor(INTERIOR_PALETTE.auroraB) },
+      uOpacity: { value: 0 },
+      uPulse: { value: 0 },
+      uTime: { value: 0 }
+    }),
+    []
+  );
+  const hazeUniforms = useMemo(
+    () => ({
+      uAudioIntensity: { value: 0 },
+      uAuroraColorA: { value: new ThreeColor(INTERIOR_PALETTE.auroraA) },
+      uCoreGlowColor: { value: new ThreeColor(INTERIOR_PALETTE.coreGlow) },
+      uOpacity: { value: 0 },
+      uPulse: { value: 0 },
+      uTime: { value: 0 }
+    }),
+    []
+  );
+
+  useFrame(({ clock }, delta) => {
+    const progress = engulfProgressRef.current;
+    const visible = progress > 0.02;
+
+    if (groupRef.current) {
+      groupRef.current.visible = visible;
+      groupRef.current.rotation.y += delta * 0.012;
+    }
+    if (!visible) {
+      return;
+    }
+
+    if (audioIntensity > pulseThresholdRef.current) {
+      pulseRef.current = Math.min(1, audioIntensity);
+      pulseThresholdRef.current = audioIntensity * 1.05;
+    }
+    pulseRef.current *= 0.92;
+    pulseThresholdRef.current = Math.max(0.5, pulseThresholdRef.current * 0.985);
+
+    const time = clock.elapsedTime;
+    const opacity = smoothStep((progress - 0.45) / 0.5);
+    const pulse = pulseRef.current;
+
+    if (surfaceMaterialRef.current) {
+      const u = surfaceMaterialRef.current.uniforms;
+      u.uTime.value = time;
+      u.uAudioIntensity.value = audioIntensity;
+      u.uPulse.value = pulse;
+      u.uEngulfProgress.value = progress;
+      u.uOpacity.value = opacity;
+    }
+    if (auroraMaterialRef.current) {
+      const u = auroraMaterialRef.current.uniforms;
+      u.uTime.value = time;
+      u.uAudioIntensity.value = audioIntensity;
+      u.uPulse.value = pulse;
+      u.uOpacity.value = opacity;
+    }
+    if (hazeMaterialRef.current) {
+      const u = hazeMaterialRef.current.uniforms;
+      u.uTime.value = time;
+      u.uAudioIntensity.value = audioIntensity;
+      u.uPulse.value = pulse;
+      u.uOpacity.value = opacity;
+    }
+  });
+
+  return (
+    <group ref={groupRef} position={[0, 0.6, 0]} visible={false}>
+      <mesh renderOrder={10} scale={INTERIOR_SURFACE_RADIUS} raycast={() => null}>
+        <sphereGeometry args={segments} />
+        <shaderMaterial
+          ref={surfaceMaterialRef}
+          depthWrite={false}
+          fragmentShader={PLANET_INTERIOR_SURFACE_FRAGMENT_SHADER}
+          side={BackSide}
+          transparent
+          uniforms={surfaceUniforms}
+          vertexShader={PLANET_VERTEX_SHADER}
+        />
+      </mesh>
+      <mesh renderOrder={11} scale={INTERIOR_AURORA_RADIUS} raycast={() => null}>
+        <sphereGeometry args={auroraSegments} />
+        <shaderMaterial
+          ref={auroraMaterialRef}
+          blending={AdditiveBlending}
+          depthWrite={false}
+          fragmentShader={PLANET_INTERIOR_AURORA_FRAGMENT_SHADER}
+          side={BackSide}
+          transparent
+          uniforms={auroraUniforms}
+          vertexShader={PLANET_VERTEX_SHADER}
+        />
+      </mesh>
+      <mesh renderOrder={12} scale={INTERIOR_HAZE_RADIUS} raycast={() => null}>
+        <sphereGeometry args={hazeSegments} />
+        <shaderMaterial
+          ref={hazeMaterialRef}
+          blending={AdditiveBlending}
+          depthWrite={false}
+          fragmentShader={PLANET_INTERIOR_HAZE_FRAGMENT_SHADER}
+          side={BackSide}
+          transparent
+          uniforms={hazeUniforms}
+          vertexShader={PLANET_VERTEX_SHADER}
+        />
+      </mesh>
+    </group>
+  );
+}
+
+function InteriorLighting({
+  engulfProgressRef
+}: {
+  engulfProgressRef: EngulfProgressRef;
+}) {
+  const pointRef = useRef<PointLight | null>(null);
+  const ambientRef = useRef<AmbientLight | null>(null);
+
+  useFrame(() => {
+    const intensity = smoothStep((engulfProgressRef.current - 0.45) / 0.5);
+    if (pointRef.current) {
+      pointRef.current.intensity = 12 * intensity;
+    }
+    if (ambientRef.current) {
+      ambientRef.current.intensity = 0.6 * intensity;
+    }
+  });
+
+  return (
+    <>
+      <pointLight
+        ref={pointRef}
+        color="#ffd38a"
+        distance={20}
+        intensity={0}
+        position={[0, 4, 0]}
+      />
+      <ambientLight ref={ambientRef} color="#f0a63b" intensity={0} />
+    </>
+  );
+}
+
 function ResponsiveCamera() {
   const { camera, size } = useThree();
 
@@ -1219,14 +1575,17 @@ function ResponsiveCamera() {
 function SceneContent(props: ElysiumSceneProps) {
   const perspective = props.playerColor ?? "white";
   const fen = props.displayFen ?? props.room?.fen ?? STARTING_FEN;
+  const engulfProgressRef = useRef(0);
 
   return (
     <>
-      <SceneAtmosphere />
+      <EngulfCoordinator active={props.planetEngulfActive} progressRef={engulfProgressRef} />
+      <SceneAtmosphere engulfProgressRef={engulfProgressRef} />
       <ambientLight intensity={1.65} />
       <directionalLight intensity={2.6} position={[-3.5, 7, 4]} />
       <pointLight color="#f0a63b" intensity={18} position={[-4, 2.8, 3]} />
       <pointLight color="#9ab8ff" intensity={16} position={[4, 3.5, -3]} />
+      <InteriorLighting engulfProgressRef={engulfProgressRef} />
       <Stars count={800} depth={36} factor={4} fade radius={80} saturation={0} />
       <Sparkles
         color="#f0d9ab"
@@ -1238,10 +1597,14 @@ function SceneContent(props: ElysiumSceneProps) {
       />
       <Planet
         audioIntensity={props.audioIntensity}
-        engulfActive={props.planetEngulfActive}
+        engulfProgressRef={engulfProgressRef}
         palette={PLANET_PALETTES.ember}
         position={[-6.8, 1.1, -11.5]}
         scale={2.45}
+      />
+      <PlanetInterior
+        audioIntensity={props.audioIntensity}
+        engulfProgressRef={engulfProgressRef}
       />
       <Planet
         audioIntensity={props.audioIntensity}
