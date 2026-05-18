@@ -57,6 +57,11 @@ const FIRST_INVERSION_MIN_DELAY = 4;
 const FIRST_INVERSION_DELAY_SPREAD = 4;
 const INVERSION_MIN_DELAY = 7;
 const INVERSION_DELAY_SPREAD = 5;
+const ENGULF_TURN_SPAN = 6;
+const FIRST_ENGULF_MIN_DELAY = 8;
+const FIRST_ENGULF_DELAY_SPREAD = 6;
+const ENGULF_MIN_DELAY = 12;
+const ENGULF_DELAY_SPREAD = 8;
 const MOVE_PHASE_MS = 820;
 const TILE_SETTLE_MS = 280;
 
@@ -109,6 +114,44 @@ function isBoardInversionActive(room: PublicRoom | null): boolean {
         episode,
         INVERSION_MIN_DELAY,
         INVERSION_DELAY_SPREAD
+      );
+  }
+
+  return moveCount >= triggerMoveCount;
+}
+
+function engulfEpisodeDelay(
+  roomId: string,
+  episode: number,
+  minimum: number,
+  spread: number
+): number {
+  return minimum + (hashString(`${roomId}:engulf:${episode}`) % (spread + 1));
+}
+
+function isPlanetEngulfActive(room: PublicRoom | null): boolean {
+  if (!room || room.status !== "active") {
+    return false;
+  }
+
+  const moveCount = room.moves.length;
+  let episode = 0;
+  let triggerMoveCount = engulfEpisodeDelay(
+    room.id,
+    episode,
+    FIRST_ENGULF_MIN_DELAY,
+    FIRST_ENGULF_DELAY_SPREAD
+  );
+
+  while (moveCount >= triggerMoveCount + ENGULF_TURN_SPAN) {
+    episode += 1;
+    triggerMoveCount +=
+      ENGULF_TURN_SPAN +
+      engulfEpisodeDelay(
+        room.id,
+        episode,
+        ENGULF_MIN_DELAY,
+        ENGULF_DELAY_SPREAD
       );
   }
 
@@ -433,6 +476,7 @@ export function GameShell() {
 
   const playerColor = room?.playerColor ?? session?.color;
   const boardInverted = useMemo(() => isBoardInversionActive(room), [room]);
+  const planetEngulfActive = useMemo(() => isPlanetEngulfActive(room), [room]);
 
   const cancelMoveAnimation = useCallback(() => {
     animationRunRef.current += 1;
@@ -770,6 +814,7 @@ export function GameShell() {
           legalTargets={sceneLegalTargets}
           moveAnimation={moveAnimation}
           onSquareClick={handleSquareClick}
+          planetEngulfActive={planetEngulfActive}
           playerColor={playerColor}
           room={room}
           selectedSquare={selectedSquare}
