@@ -29,6 +29,7 @@ type ElysiumSceneProps = {
   moveAnimation: SceneMoveAnimation | null;
   audioIntensity: number;
   boardInverted: boolean;
+  planetEngulfActive: boolean;
   onSquareClick: (square: Square) => void;
 };
 
@@ -415,6 +416,10 @@ function squarePosition(square: Square, perspective: PlayerColor): [number, numb
 function smoothStep(value: number): number {
   const clamped = Math.max(0, Math.min(1, value));
   return clamped * clamped * (3 - 2 * clamped);
+}
+
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
 }
 
 function boardSubmersionForTime(time: number): number {
@@ -1060,18 +1065,25 @@ function Planet({
   position,
   palette,
   scale,
-  audioIntensity
+  audioIntensity,
+  engulfActive = false,
+  engulfCenter = [0, 0.6, 0],
+  engulfScale = 7
 }: {
   position: [number, number, number];
   palette: PlanetPalette;
   scale: number;
   audioIntensity: number;
+  engulfActive?: boolean;
+  engulfCenter?: [number, number, number];
+  engulfScale?: number;
 }) {
   const groupRef = useRef<Group | null>(null);
   const cloudRef = useRef<Mesh | null>(null);
   const surfaceMaterialRef = useRef<ShaderMaterial | null>(null);
   const cloudMaterialRef = useRef<ShaderMaterial | null>(null);
   const atmosphereMaterialRef = useRef<ShaderMaterial | null>(null);
+  const engulfProgressRef = useRef(0);
   const surfaceUniforms = useMemo(
     () => ({
       uAudioIntensity: { value: 0 },
@@ -1106,13 +1118,21 @@ function Planet({
     [palette]
   );
 
-  useFrame(({ clock }) => {
+  useFrame(({ clock }, delta) => {
     const time = clock.elapsedTime;
-    const activeScale = scale + audioIntensity * 0.16;
+    const target = engulfActive ? 1 : 0;
+    engulfProgressRef.current +=
+      (target - engulfProgressRef.current) * Math.min(1, delta * 1.1);
+    const t = smoothStep(engulfProgressRef.current);
+    const baseScale = scale + audioIntensity * 0.16;
+    const activeScale = lerp(baseScale, engulfScale, t);
 
     if (groupRef.current) {
       groupRef.current.rotation.y = time * palette.rotationSpeed;
       groupRef.current.rotation.z = Math.sin(time * 0.08) * 0.025;
+      groupRef.current.position.x = lerp(position[0], engulfCenter[0], t);
+      groupRef.current.position.y = lerp(position[1], engulfCenter[1], t);
+      groupRef.current.position.z = lerp(position[2], engulfCenter[2], t);
       groupRef.current.scale.setScalar(activeScale);
     }
 
@@ -1218,6 +1238,7 @@ function SceneContent(props: ElysiumSceneProps) {
       />
       <Planet
         audioIntensity={props.audioIntensity}
+        engulfActive={props.planetEngulfActive}
         palette={PLANET_PALETTES.ember}
         position={[-6.8, 1.1, -11.5]}
         scale={2.45}
