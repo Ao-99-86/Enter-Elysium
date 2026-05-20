@@ -278,6 +278,53 @@ const PLANET_ATMOSPHERE_FRAGMENT_SHADER = `
   }
 `;
 
+const WHALE_FRAGMENT_SHADER = `
+  uniform vec3 uShadowColor;
+  uniform vec3 uSkinColor;
+  uniform vec3 uAuroraColorA;
+  uniform vec3 uAuroraColorB;
+  uniform vec3 uHighlightColor;
+  uniform vec3 uLightDirection;
+  uniform float uTime;
+  uniform float uAudioIntensity;
+  uniform float uOpacity;
+
+  varying vec3 vObjectPosition;
+  varying vec3 vWorldNormal;
+  varying vec3 vViewDirection;
+
+  ${PLANET_NOISE_SHADER}
+
+  void main() {
+    vec3 normal = normalize(vWorldNormal);
+    vec3 viewDirection = normalize(vViewDirection);
+    vec3 samplePoint = vObjectPosition;
+    vec3 drift = vec3(uTime * 0.05, uTime * 0.02, -uTime * 0.04);
+
+    float mottle = fbm(samplePoint * 2.4 + drift);
+    float ribbons = fbm(samplePoint * 5.6 - drift.yzx);
+    float ribbonMask = 1.0 - abs(ribbons * 2.0 - 1.0);
+    float auroraMix = fbm(samplePoint * 1.3 + vec3(uTime * 0.08, 0.0, -uTime * 0.06));
+
+    vec3 base = mix(uShadowColor, uSkinColor, smoothstep(0.32, 0.78, mottle));
+    vec3 auroraColor = mix(uAuroraColorA, uAuroraColorB, auroraMix);
+    vec3 color = mix(base, auroraColor, smoothstep(0.55, 0.92, ribbonMask + mottle * 0.18));
+    color = mix(color, uHighlightColor, smoothstep(0.84, 0.98, ribbonMask));
+
+    float diffuse = max(dot(normal, normalize(uLightDirection)), 0.0);
+    float wrap = clamp(dot(normal, normalize(uLightDirection)) * 0.5 + 0.5, 0.0, 1.0);
+    float rim = pow(1.0 - max(dot(normal, viewDirection), 0.0), 2.5);
+    float pulse = 0.5 + 0.5 * sin(uTime * 0.6 + samplePoint.x * 3.0);
+    float audioGlow = 0.28 + uAudioIntensity * 0.6;
+
+    color *= 0.18 + diffuse * 0.42 + wrap * 0.32;
+    color += auroraColor * rim * audioGlow;
+    color += uHighlightColor * rim * pulse * 0.18;
+
+    gl_FragColor = vec4(color, uOpacity * (0.78 + rim * 0.22));
+  }
+`;
+
 const PLANET_INTERIOR_SURFACE_FRAGMENT_SHADER = `
   uniform vec3 uShadowColor;
   uniform vec3 uEmberColor;
@@ -1208,6 +1255,175 @@ function SceneAtmosphere({ engulfProgressRef }: { engulfProgressRef: EngulfProgr
   return null;
 }
 
+const WHALE_PALETTE = {
+  shadow: "#0a0d22",
+  skin: "#2a3b78",
+  auroraA: INTERIOR_PALETTE.auroraA,
+  auroraB: "#8af7ff",
+  highlight: INTERIOR_PALETTE.coreGlow,
+  halo: "#a4b8ff"
+};
+
+function SpaceWhale({
+  audioIntensity,
+  engulfProgressRef
+}: {
+  audioIntensity: number;
+  engulfProgressRef: EngulfProgressRef;
+}) {
+  const groupRef = useRef<Group | null>(null);
+  const tailRef = useRef<Group | null>(null);
+  const leftFinRef = useRef<Group | null>(null);
+  const rightFinRef = useRef<Group | null>(null);
+  const bodyMaterialRef = useRef<ShaderMaterial | null>(null);
+  const haloMaterialRef = useRef<ShaderMaterial | null>(null);
+
+  const bodyUniforms = useMemo(
+    () => ({
+      uAudioIntensity: { value: 0 },
+      uAuroraColorA: { value: new ThreeColor(WHALE_PALETTE.auroraA) },
+      uAuroraColorB: { value: new ThreeColor(WHALE_PALETTE.auroraB) },
+      uHighlightColor: { value: new ThreeColor(WHALE_PALETTE.highlight) },
+      uLightDirection: { value: PLANET_LIGHT_DIRECTION },
+      uOpacity: { value: 1 },
+      uShadowColor: { value: new ThreeColor(WHALE_PALETTE.shadow) },
+      uSkinColor: { value: new ThreeColor(WHALE_PALETTE.skin) },
+      uTime: { value: 0 }
+    }),
+    []
+  );
+
+  const haloUniforms = useMemo(
+    () => ({
+      uAtmosphereColor: { value: new ThreeColor(WHALE_PALETTE.halo) },
+      uAudioIntensity: { value: 0 },
+      uOpacity: { value: 1 },
+      uTime: { value: 0 }
+    }),
+    []
+  );
+
+  useFrame(({ clock }) => {
+    const time = clock.elapsedTime;
+    const progress = engulfProgressRef.current;
+    const fade = 1 - smoothStep((progress - 0.35) / 0.3);
+
+    const group = groupRef.current;
+    const tail = tailRef.current;
+    const leftFin = leftFinRef.current;
+    const rightFin = rightFinRef.current;
+
+    const speed = 0.06 + audioIntensity * 0.04;
+    const phase = time * speed;
+
+    if (group) {
+      const x = Math.sin(phase) * 14;
+      const y = 4 + Math.sin(phase * 0.7) * 1.2;
+      const z = -14 + Math.cos(phase * 2) * 4;
+      group.position.set(x, y, z);
+
+      const velocityX = Math.cos(phase) * 14;
+      const velocityZ = -Math.sin(phase * 2) * 8;
+      group.rotation.y = Math.atan2(-velocityZ, velocityX);
+      group.rotation.z = Math.sin(phase * 0.5) * 0.12;
+      group.rotation.x = Math.sin(phase * 1.3) * 0.08;
+      group.visible = fade > 0.01;
+    }
+
+    if (tail) {
+      tail.rotation.y = Math.sin(time * 1.8) * 0.35;
+      tail.rotation.z = Math.sin(time * 1.8 + 0.6) * 0.18;
+    }
+
+    if (leftFin) {
+      leftFin.rotation.x = Math.sin(time * 1.2) * 0.22;
+    }
+    if (rightFin) {
+      rightFin.rotation.x = -Math.sin(time * 1.2 + 0.4) * 0.22;
+    }
+
+    if (bodyMaterialRef.current) {
+      bodyMaterialRef.current.uniforms.uTime.value = time;
+      bodyMaterialRef.current.uniforms.uAudioIntensity.value = audioIntensity;
+      bodyMaterialRef.current.uniforms.uOpacity.value = fade;
+    }
+    if (haloMaterialRef.current) {
+      haloMaterialRef.current.uniforms.uTime.value = time;
+      haloMaterialRef.current.uniforms.uAudioIntensity.value = audioIntensity;
+      haloMaterialRef.current.uniforms.uOpacity.value = fade * 0.85;
+    }
+  });
+
+  return (
+    <group ref={groupRef} renderOrder={0}>
+      <mesh scale={[2.4, 0.9, 0.9]}>
+        <sphereGeometry args={[1, 48, 32]} />
+        <shaderMaterial
+          ref={bodyMaterialRef}
+          fragmentShader={WHALE_FRAGMENT_SHADER}
+          transparent
+          uniforms={bodyUniforms}
+          vertexShader={PLANET_VERTEX_SHADER}
+        />
+      </mesh>
+      <mesh scale={[2.6, 1.0, 1.0]} renderOrder={-1}>
+        <sphereGeometry args={[1.08, 32, 24]} />
+        <shaderMaterial
+          ref={haloMaterialRef}
+          blending={AdditiveBlending}
+          depthWrite={false}
+          fragmentShader={PLANET_ATMOSPHERE_FRAGMENT_SHADER}
+          transparent
+          uniforms={haloUniforms}
+          vertexShader={PLANET_VERTEX_SHADER}
+        />
+      </mesh>
+      <group ref={tailRef} position={[-2.2, 0, 0]}>
+        <mesh rotation={[0, 0, Math.PI / 2]} scale={[0.18, 1, 1]}>
+          <coneGeometry args={[0.85, 1.1, 12, 1, true]} />
+          <shaderMaterial
+            fragmentShader={WHALE_FRAGMENT_SHADER}
+            transparent
+            uniforms={bodyUniforms}
+            vertexShader={PLANET_VERTEX_SHADER}
+          />
+        </mesh>
+      </group>
+      <group ref={leftFinRef} position={[0.2, -0.1, 0.85]}>
+        <mesh rotation={[Math.PI / 2, 0, 0.4]} scale={[0.16, 1, 1]}>
+          <coneGeometry args={[0.45, 1.1, 12, 1, true]} />
+          <shaderMaterial
+            fragmentShader={WHALE_FRAGMENT_SHADER}
+            transparent
+            uniforms={bodyUniforms}
+            vertexShader={PLANET_VERTEX_SHADER}
+          />
+        </mesh>
+      </group>
+      <group ref={rightFinRef} position={[0.2, -0.1, -0.85]}>
+        <mesh rotation={[-Math.PI / 2, 0, 0.4]} scale={[0.16, 1, 1]}>
+          <coneGeometry args={[0.45, 1.1, 12, 1, true]} />
+          <shaderMaterial
+            fragmentShader={WHALE_FRAGMENT_SHADER}
+            transparent
+            uniforms={bodyUniforms}
+            vertexShader={PLANET_VERTEX_SHADER}
+          />
+        </mesh>
+      </group>
+      <mesh position={[1.6, 0.1, 0]} scale={[0.7, 0.6, 0.6]}>
+        <sphereGeometry args={[1, 32, 24]} />
+        <shaderMaterial
+          fragmentShader={WHALE_FRAGMENT_SHADER}
+          transparent
+          uniforms={bodyUniforms}
+          vertexShader={PLANET_VERTEX_SHADER}
+        />
+      </mesh>
+    </group>
+  );
+}
+
 function Planet({
   position,
   palette,
@@ -1595,6 +1811,7 @@ function SceneContent(props: ElysiumSceneProps) {
         size={1.9 + props.audioIntensity * 3}
         speed={0.22}
       />
+      <SpaceWhale audioIntensity={props.audioIntensity} engulfProgressRef={engulfProgressRef} />
       <Planet
         audioIntensity={props.audioIntensity}
         engulfProgressRef={engulfProgressRef}
