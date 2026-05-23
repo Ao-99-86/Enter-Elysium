@@ -95,8 +95,8 @@ function publicRoom(room: Room, playerToken?: string): PublicRoom {
     result: room.result,
     winner: room.winner,
     players: {
-      white: true,
-      black: mode === "single-player" ? room.aiColor === "black" : Boolean(room.blackToken)
+      white: mode === "single-player" ? true : Boolean(room.whiteToken),
+      black: mode === "single-player" ? true : Boolean(room.blackToken)
     },
     moves: room.moves,
     lastMove: room.moves.at(-1),
@@ -179,12 +179,36 @@ export async function createRoom(store: RoomStore): Promise<{
   throw new RoomError(503, "room_id_exhausted", "Could not allocate a room code.");
 }
 
-export async function createSinglePlayerRoom(store: RoomStore): Promise<{
+export type SoloColorChoice = "white" | "black" | "random";
+
+export type CreateSinglePlayerRoomOptions = {
+  color?: SoloColorChoice;
+};
+
+function resolveSoloColor(choice: SoloColorChoice | undefined): PlayerColor {
+  if (choice === "black") {
+    return "black";
+  }
+
+  if (choice === "random") {
+    return crypto.randomInt(2) === 0 ? "white" : "black";
+  }
+
+  return "white";
+}
+
+export async function createSinglePlayerRoom(
+  store: RoomStore,
+  options: CreateSinglePlayerRoomOptions = {}
+): Promise<{
   roomId: string;
   playerToken: string;
   color: PlayerColor;
   room: PublicRoom;
 }> {
+  const playerColor = resolveSoloColor(options.color);
+  const aiColor: PlayerColor = playerColor === "white" ? "black" : "white";
+
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const roomId = generateRoomId();
     const existing = await store.getRoom(roomId);
@@ -198,10 +222,11 @@ export async function createSinglePlayerRoom(store: RoomStore): Promise<{
     const room: Room = {
       id: roomId,
       mode: "single-player",
-      aiColor: "black",
+      aiColor,
       fen: STARTING_FEN,
       pgn: "",
-      whiteToken: playerToken,
+      whiteToken: playerColor === "white" ? playerToken : generateToken(),
+      blackToken: playerColor === "black" ? playerToken : generateToken(),
       status: "active",
       moves: [],
       createdAt: now,
@@ -209,12 +234,32 @@ export async function createSinglePlayerRoom(store: RoomStore): Promise<{
       version: 1
     };
 
+    // When the player picks black, AI plays white and must make the first move
+    // so the room arrives in the player's-turn state.
+    if (aiColor === "white") {
+      const chess = new Chess(room.fen);
+      const aiMove = chooseGreedyAiMove(chess);
+      if (aiMove) {
+        const applied = chess.move({
+          from: aiMove.from,
+          to: aiMove.to,
+          ...(aiMove.promotion ? { promotion: aiMove.promotion } : {})
+        });
+        const playedAt = Date.now();
+        room.fen = chess.fen();
+        room.pgn = chess.pgn();
+        room.moves.push(toMoveRecord(applied, playedAt));
+        room.updatedAt = playedAt;
+        room.version += 1;
+      }
+    }
+
     await store.setRoom(room);
 
     return {
       roomId,
       playerToken,
-      color: "white",
+      color: playerColor,
       room: publicRoom(room, playerToken)
     };
   }
