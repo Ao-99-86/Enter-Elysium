@@ -7,10 +7,14 @@ import { useEffect, useMemo, useRef } from "react";
 import { AdditiveBlending, BackSide, Color as ThreeColor, Fog, Vector3 } from "three";
 import type {
   AmbientLight,
+  BufferAttribute,
+  BufferGeometry,
   Group,
   Mesh,
   MeshStandardMaterial,
   PerspectiveCamera,
+  Points,
+  PointsMaterial,
   PointLight,
   ShaderMaterial
 } from "three";
@@ -77,6 +81,28 @@ const WATER_SURFACE_Y = -0.23;
 const TARGET_TILE_LIFT = 0.32;
 const SELECTED_PIECE_LIFT = 0.28;
 const MOVE_PHASE_SECONDS = 0.82;
+const PURPLE_RAMP_IN = 6;
+const PURPLE_HOLD = 14;
+const PURPLE_RAMP_OUT = 9;
+const PURPLE_QUIET = 44;
+const PURPLE_TOTAL_SECONDS =
+  PURPLE_RAMP_IN + PURPLE_HOLD + PURPLE_RAMP_OUT + PURPLE_QUIET;
+const PURPLE_OFFSET_SECONDS = 29.5;
+const PURPLE_PALETTE = {
+  surface: "#5a2a8c",
+  deep: "#1a0833",
+  foam: "#e8c4ff",
+  glow: "#c08aff",
+  background: "#14071f",
+  fog: "#2a1144",
+  rain: "#c08aff",
+  pianoLight: "#b48cff"
+} as const;
+const RAIN_PARTICLE_COUNT = 600;
+const RAIN_AREA = 30;
+const RAIN_TOP = 18;
+const RAIN_MIN_SPEED = 1.8;
+const RAIN_MAX_SPEED = 3.2;
 
 type PlanetPalette = {
   shadow: string;
@@ -477,6 +503,11 @@ const WATER_FRAGMENT_SHADER = `
   uniform vec3 uSurfaceColor;
   uniform vec3 uFoamColor;
   uniform vec3 uGlowColor;
+  uniform vec3 uPurpleDeep;
+  uniform vec3 uPurpleSurface;
+  uniform vec3 uPurpleFoam;
+  uniform vec3 uPurpleGlow;
+  uniform float uPurplePhase;
   uniform float uTime;
   uniform float uAudioIntensity;
   uniform float uSubmersion;
@@ -509,10 +540,19 @@ const WATER_FRAGMENT_SHADER = `
     color += uFoamColor * current * 0.08;
     color = mix(color, uDeepColor, uSubmersion * 0.22);
 
+    vec3 purpleColor = mix(uPurpleSurface, uPurpleDeep, depth * 0.72);
+    purpleColor += uPurpleGlow * softSheen * (0.65 + uAudioIntensity * 0.32);
+    purpleColor = mix(purpleColor, uPurpleFoam, wake * (0.38 + uAudioIntensity * 0.18));
+    purpleColor += uPurpleFoam * current * 0.1;
+    purpleColor = mix(purpleColor, uPurpleDeep, uSubmersion * 0.22);
+
+    color = mix(color, purpleColor, clamp(uPurplePhase, 0.0, 1.0) * 0.95);
+
     float surfaceAlpha = 0.9 + current * 0.05 + wake * 0.06 + glint * 0.03;
     float underwaterAlpha = 0.36 + current * 0.05 + wake * 0.03 + glint * 0.04;
     float alpha = mix(surfaceAlpha, underwaterAlpha, uSubmersion);
-    gl_FragColor = vec4(color, alpha);
+    alpha += uPurplePhase * (glint * 0.05 + wake * 0.04);
+    gl_FragColor = vec4(color, clamp(alpha, 0.0, 1.0));
   }
 `;
 
@@ -627,6 +667,26 @@ function boardSubmersionForTime(time: number): number {
   }
 
   return 1 - smoothStep((phase - underwaterEnd) / BOARD_ASCEND_SECONDS);
+}
+
+function purplePhaseForTime(time: number): number {
+  const phase = (time + PURPLE_OFFSET_SECONDS) % PURPLE_TOTAL_SECONDS;
+  const holdEnd = PURPLE_RAMP_IN + PURPLE_HOLD;
+  const fadeEnd = holdEnd + PURPLE_RAMP_OUT;
+
+  if (phase < PURPLE_RAMP_IN) {
+    return smoothStep(phase / PURPLE_RAMP_IN);
+  }
+
+  if (phase < holdEnd) {
+    return 1;
+  }
+
+  if (phase < fadeEnd) {
+    return 1 - smoothStep((phase - holdEnd) / PURPLE_RAMP_OUT);
+  }
+
+  return 0;
 }
 
 function playerColorToSceneColor(color: PlayerColor): Color {
@@ -1102,6 +1162,11 @@ function WaterPlane({ audioIntensity }: { audioIntensity: number }) {
       uDeepColor: { value: new ThreeColor("#064452") },
       uFoamColor: { value: new ThreeColor("#b8fff3") },
       uGlowColor: { value: new ThreeColor("#8af7ff") },
+      uPurpleDeep: { value: new ThreeColor(PURPLE_PALETTE.deep) },
+      uPurpleFoam: { value: new ThreeColor(PURPLE_PALETTE.foam) },
+      uPurpleGlow: { value: new ThreeColor(PURPLE_PALETTE.glow) },
+      uPurplePhase: { value: 0 },
+      uPurpleSurface: { value: new ThreeColor(PURPLE_PALETTE.surface) },
       uSurfaceColor: { value: new ThreeColor("#15959a") },
       uSubmersion: { value: 0 },
       uTime: { value: 0 }
@@ -1122,6 +1187,7 @@ function WaterPlane({ audioIntensity }: { audioIntensity: number }) {
     if (materialRef.current) {
       materialRef.current.uniforms.uAudioIntensity.value = audioIntensity;
       materialRef.current.uniforms.uSubmersion.value = boardSubmersionForTime(time);
+      materialRef.current.uniforms.uPurplePhase.value = purplePhaseForTime(time);
       materialRef.current.uniforms.uTime.value = time;
     }
   });
@@ -1195,6 +1261,91 @@ function UnderwaterSurface({ audioIntensity }: { audioIntensity: number }) {
   );
 }
 
+function PurpleRain() {
+  const pointsRef = useRef<Points | null>(null);
+  const materialRef = useRef<PointsMaterial | null>(null);
+  const geometryRef = useRef<BufferGeometry | null>(null);
+
+  const { positions, velocities } = useMemo(() => {
+    const positionArray = new Float32Array(RAIN_PARTICLE_COUNT * 3);
+    const velocityArray = new Float32Array(RAIN_PARTICLE_COUNT);
+
+    for (let index = 0; index < RAIN_PARTICLE_COUNT; index += 1) {
+      const offset = index * 3;
+      positionArray[offset] = (Math.random() - 0.5) * RAIN_AREA * 2;
+      positionArray[offset + 1] = WATER_SURFACE_Y + Math.random() * RAIN_TOP;
+      positionArray[offset + 2] = (Math.random() - 0.5) * RAIN_AREA * 2;
+      velocityArray[index] =
+        RAIN_MIN_SPEED + Math.random() * (RAIN_MAX_SPEED - RAIN_MIN_SPEED);
+    }
+
+    return { positions: positionArray, velocities: velocityArray };
+  }, []);
+
+  useFrame(({ clock }, delta) => {
+    const phase = purplePhaseForTime(clock.elapsedTime);
+    const points = pointsRef.current;
+    const material = materialRef.current;
+    const geometry = geometryRef.current;
+
+    if (material) {
+      material.opacity = phase * 0.75;
+    }
+
+    if (points) {
+      points.visible = phase > 0.01;
+      if (!points.visible) {
+        return;
+      }
+    }
+
+    if (!geometry) {
+      return;
+    }
+
+    const attribute = geometry.attributes.position as BufferAttribute;
+    const array = attribute.array as Float32Array;
+    const step = Math.min(delta, 0.05);
+
+    for (let index = 0; index < RAIN_PARTICLE_COUNT; index += 1) {
+      const yOffset = index * 3 + 1;
+      array[yOffset] -= velocities[index] * step;
+
+      if (array[yOffset] < WATER_SURFACE_Y) {
+        const base = index * 3;
+        array[base] = (Math.random() - 0.5) * RAIN_AREA * 2;
+        array[yOffset] = RAIN_TOP + Math.random() * 4;
+        array[base + 2] = (Math.random() - 0.5) * RAIN_AREA * 2;
+      }
+    }
+
+    attribute.needsUpdate = true;
+  });
+
+  return (
+    <points ref={pointsRef} renderOrder={6} raycast={() => null} visible={false}>
+      <bufferGeometry ref={geometryRef}>
+        <bufferAttribute
+          attach="attributes-position"
+          args={[positions, 3]}
+          count={RAIN_PARTICLE_COUNT}
+          itemSize={3}
+        />
+      </bufferGeometry>
+      <pointsMaterial
+        ref={materialRef}
+        blending={AdditiveBlending}
+        color={PURPLE_PALETTE.rain}
+        depthWrite={false}
+        opacity={0}
+        size={0.32}
+        sizeAttenuation
+        transparent
+      />
+    </points>
+  );
+}
+
 function SceneAtmosphere({ engulfProgressRef }: { engulfProgressRef: EngulfProgressRef }) {
   const { scene } = useThree();
   const backgroundColorRef = useRef(new ThreeColor("#07090b"));
@@ -1205,7 +1356,9 @@ function SceneAtmosphere({ engulfProgressRef }: { engulfProgressRef: EngulfProgr
     underwaterBackground: new ThreeColor("#021d26"),
     underwaterFog: new ThreeColor("#043540"),
     interiorBackground: new ThreeColor(INTERIOR_PALETTE.fog),
-    interiorFog: new ThreeColor(INTERIOR_PALETTE.fog)
+    interiorFog: new ThreeColor(INTERIOR_PALETTE.fog),
+    purpleBackground: new ThreeColor(PURPLE_PALETTE.background),
+    purpleFog: new ThreeColor(PURPLE_PALETTE.fog)
   });
 
   useEffect(() => {
@@ -1235,20 +1388,23 @@ function SceneAtmosphere({ engulfProgressRef }: { engulfProgressRef: EngulfProgr
       Math.min(1, submersion * (0.94 + Math.sin(clock.elapsedTime * 0.72) * 0.06))
     );
     const interior = smoothStep((engulfProgressRef.current - 0.45) / 0.5);
+    const purple = purplePhaseForTime(clock.elapsedTime);
     const palette = paletteRef.current;
 
     backgroundColorRef.current
       .copy(palette.surfaceBackground)
       .lerp(palette.underwaterBackground, current)
-      .lerp(palette.interiorBackground, interior);
+      .lerp(palette.interiorBackground, interior)
+      .lerp(palette.purpleBackground, purple * 0.7);
 
     if (fogRef.current) {
       fogRef.current.color
         .copy(palette.surfaceFog)
         .lerp(palette.underwaterFog, current)
-        .lerp(palette.interiorFog, interior);
+        .lerp(palette.interiorFog, interior)
+        .lerp(palette.purpleFog, purple * 0.65);
       fogRef.current.near = 8 - current * 3.2;
-      fogRef.current.far = lerp(28 - current * 8.5, 60, interior);
+      fogRef.current.far = lerp(28 - current * 8.5, 60, interior) - purple * 3;
     }
   });
 
@@ -1788,6 +1944,192 @@ function ResponsiveCamera() {
   return null;
 }
 
+const PIANO_WHITE_KEY_COUNT = 14;
+const PIANO_WHITE_KEY_WIDTH = 0.14;
+const PIANO_WHITE_KEY_GAP = 0.012;
+const PIANO_WHITE_KEY_SPAN =
+  PIANO_WHITE_KEY_COUNT * PIANO_WHITE_KEY_WIDTH +
+  (PIANO_WHITE_KEY_COUNT - 1) * PIANO_WHITE_KEY_GAP;
+const PIANO_BLACK_KEY_OFFSETS = [
+  -1.05, -0.79, -0.27, -0.01, 0.25, 0.77, 1.03, 1.29, 1.55
+] as const;
+
+function EtherealPiano({ audioIntensity }: { audioIntensity: number }) {
+  const groupRef = useRef<Group | null>(null);
+  const lidRef = useRef<Group | null>(null);
+  const materialsRef = useRef<MeshStandardMaterial[]>([]);
+
+  useEffect(() => {
+    const group = groupRef.current;
+    if (!group) {
+      return;
+    }
+
+    const materials: MeshStandardMaterial[] = [];
+    group.traverse((object) => {
+      const mesh = object as Mesh;
+      const material = mesh.material as
+        | MeshStandardMaterial
+        | MeshStandardMaterial[]
+        | undefined;
+      if (!material) {
+        return;
+      }
+      const list = Array.isArray(material) ? material : [material];
+      list.forEach((item) => {
+        materials.push(item);
+      });
+    });
+    materialsRef.current = materials;
+  }, []);
+
+  useFrame(({ clock }) => {
+    const time = clock.elapsedTime;
+    const group = groupRef.current;
+    const lid = lidRef.current;
+
+    if (group) {
+      group.position.y = 2.2 + Math.sin(time * 0.32) * 0.18;
+      group.rotation.z = 0.05 + Math.sin(time * 0.22) * 0.04;
+      group.rotation.y = -1.0 + Math.sin(time * 0.11) * 0.04;
+    }
+
+    if (lid) {
+      lid.rotation.x = -0.5 + Math.sin(time * 0.28) * 0.04;
+    }
+
+    const intensity = 1.4 + audioIntensity * 0.7;
+    materialsRef.current.forEach((material) => {
+      material.emissiveIntensity = intensity;
+    });
+  });
+
+  const whiteKeyStart = -PIANO_WHITE_KEY_SPAN / 2 + PIANO_WHITE_KEY_WIDTH / 2;
+
+  return (
+    <group
+      ref={groupRef}
+      position={[0.4, 2.2, -10]}
+      rotation={[0, -1.0, 0.05]}
+      scale={1.7}
+    >
+      <pointLight
+        color={PURPLE_PALETTE.pianoLight}
+        distance={6}
+        intensity={3}
+        position={[0, 0.4, 0.6]}
+      />
+      <mesh position={[0, 0, 0]}>
+        <boxGeometry args={[2.4, 1.4, 1.0]} />
+        <meshStandardMaterial
+          color="#d9c8ff"
+          depthWrite={false}
+          emissive="#6a3fb0"
+          emissiveIntensity={1.4}
+          metalness={0.4}
+          opacity={0.92}
+          roughness={0.2}
+          transparent
+        />
+      </mesh>
+      <group ref={lidRef} position={[0, 0.7, -0.5]} rotation={[-0.5, 0, 0]}>
+        <mesh position={[0, 0.04, 0.5]}>
+          <boxGeometry args={[2.4, 0.08, 1.0]} />
+          <meshStandardMaterial
+            color="#d9c8ff"
+            depthWrite={false}
+            emissive="#6a3fb0"
+            emissiveIntensity={1.1}
+            metalness={0.4}
+            opacity={0.78}
+            roughness={0.2}
+            transparent
+          />
+        </mesh>
+      </group>
+      <mesh position={[0, 0.78, 0.32]}>
+        <boxGeometry args={[2.3, 0.12, 0.55]} />
+        <meshStandardMaterial
+          color="#f4ecff"
+          depthWrite={false}
+          emissive="#6a3fb0"
+          emissiveIntensity={0.85}
+          metalness={0.25}
+          opacity={0.85}
+          roughness={0.32}
+          transparent
+        />
+      </mesh>
+      {Array.from({ length: PIANO_WHITE_KEY_COUNT }, (_, index) => {
+        const x =
+          whiteKeyStart + index * (PIANO_WHITE_KEY_WIDTH + PIANO_WHITE_KEY_GAP);
+        return (
+          <mesh key={`white-${index}`} position={[x, 0.88, 0.4]}>
+            <boxGeometry args={[PIANO_WHITE_KEY_WIDTH, 0.04, 0.4]} />
+            <meshStandardMaterial
+              color="#f4ecff"
+              depthWrite={false}
+              emissive="#6a3fb0"
+              emissiveIntensity={0.9}
+              metalness={0.25}
+              opacity={0.92}
+              roughness={0.28}
+              transparent
+            />
+          </mesh>
+        );
+      })}
+      {PIANO_BLACK_KEY_OFFSETS.map((x, index) => (
+        <mesh key={`black-${index}`} position={[x, 0.93, 0.32]}>
+          <boxGeometry args={[0.08, 0.06, 0.24]} />
+          <meshStandardMaterial
+            color="#2a1144"
+            depthWrite={false}
+            emissive="#6a3fb0"
+            emissiveIntensity={1.0}
+            metalness={0.5}
+            opacity={0.92}
+            roughness={0.22}
+            transparent
+          />
+        </mesh>
+      ))}
+      <mesh position={[0, 1.05, -0.05]} rotation={[-0.35, 0, 0]}>
+        <boxGeometry args={[1.6, 0.5, 0.05]} />
+        <meshStandardMaterial
+          color="#d9c8ff"
+          depthWrite={false}
+          emissive="#6a3fb0"
+          emissiveIntensity={1.0}
+          metalness={0.35}
+          opacity={0.7}
+          roughness={0.28}
+          transparent
+        />
+      </mesh>
+      {[
+        [-1.05, -1.5, 0.4] as const,
+        [1.05, -1.5, 0.4] as const,
+        [0, -1.5, -0.4] as const
+      ].map(([x, y, z], index) => (
+        <mesh key={`leg-${index}`} position={[x, y, z]}>
+          <cylinderGeometry args={[0.06, 0.06, 1.6, 12]} />
+          <meshStandardMaterial
+            color="#d9c8ff"
+            depthWrite={false}
+            emissive="#6a3fb0"
+            emissiveIntensity={1.0}
+            metalness={0.4}
+            opacity={0.7}
+            roughness={0.25}
+            transparent
+          />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
 function SceneContent(props: ElysiumSceneProps) {
   const perspective = props.playerColor ?? "white";
   const fen = props.displayFen ?? props.room?.fen ?? STARTING_FEN;
@@ -1829,8 +2171,10 @@ function SceneContent(props: ElysiumSceneProps) {
         position={[-1, 1, -11]}
         scale={1.35}
       />
+      <EtherealPiano audioIntensity={props.audioIntensity} />
       <WaterPlane audioIntensity={props.audioIntensity} />
       <UnderwaterSurface audioIntensity={props.audioIntensity} />
+      <PurpleRain />
       <Board
         audioIntensity={props.audioIntensity}
         fen={fen}
