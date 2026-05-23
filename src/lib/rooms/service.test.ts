@@ -81,6 +81,32 @@ describe("rooms service", () => {
     });
   });
 
+  it("creates a solo room where the player picks black and the AI opens", async () => {
+    const created = await createSinglePlayerRoom(store, { color: "black" });
+
+    expect(created.color).toBe("black");
+    expect(created.room.aiColor).toBe("white");
+    expect(created.room.turn).toBe("black");
+    expect(created.room.moves).toHaveLength(1);
+    expect(created.room.moves[0].color).toBe("white");
+  });
+
+  it("rolls a random solo color server-side", async () => {
+    const created = await createSinglePlayerRoom(store, { color: "random" });
+
+    expect(["white", "black"]).toContain(created.color);
+    const aiColor = created.color === "white" ? "black" : "white";
+    expect(created.room.aiColor).toBe(aiColor);
+  });
+
+  it("defaults to white when no color is supplied", async () => {
+    const created = await createSinglePlayerRoom(store);
+
+    expect(created.color).toBe("white");
+    expect(created.room.aiColor).toBe("black");
+    expect(created.room.moves).toHaveLength(0);
+  });
+
   it("plays an AI response after a solo human move", async () => {
     const created = await createSinglePlayerRoom(store);
     const room = await submitMove(store, created.roomId, {
