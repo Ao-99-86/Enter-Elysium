@@ -5,6 +5,7 @@ import { Chess, type Square } from "chess.js";
 import {
   Bot,
   ChevronDown,
+  ChevronUp,
   Clipboard,
   DoorOpen,
   Gamepad2,
@@ -348,7 +349,7 @@ function AudioControl({
   const sourceRef = useRef<MediaElementAudioSourceNode | null>(null);
   const frameRef = useRef<number | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [volume, setVolume] = useState(0.65);
+  const [volume, setVolume] = useState(0.22);
   const [audioError, setAudioError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -441,6 +442,50 @@ function AudioControl({
     }
   }, [ensureAudioGraph, isPlaying]);
 
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) {
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    const start = async () => {
+      if (cancelled) {
+        return;
+      }
+      const context = ensureAudioGraph();
+      if (!context) {
+        return;
+      }
+      try {
+        await context.resume();
+        await audio.play();
+        if (!cancelled) {
+          setAudioError(null);
+          setIsPlaying(true);
+        }
+      } catch {
+        // Browser blocked autoplay; wait for the first user gesture.
+      }
+    };
+
+    const gestureStart = () => {
+      void start();
+    };
+
+    void start();
+
+    window.addEventListener("pointerdown", gestureStart, { once: true });
+    window.addEventListener("keydown", gestureStart, { once: true });
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener("pointerdown", gestureStart);
+      window.removeEventListener("keydown", gestureStart);
+    };
+  }, [ensureAudioGraph]);
+
   return (
     <div className="audio-panel">
       <audio
@@ -518,6 +563,7 @@ export function GameShell() {
   const [heldLegalTargets, setHeldLegalTargets] = useState<Square[]>([]);
   const [moveAnimation, setMoveAnimation] = useState<SceneMoveAnimation | null>(null);
   const [focusMode, setFocusMode] = useState(false);
+  const [panelCollapsed, setPanelCollapsed] = useState(false);
   const animationLockRef = useRef(false);
   const animationRunRef = useRef(0);
 
@@ -897,7 +943,11 @@ export function GameShell() {
   }, [cancelMoveAnimation, exitFocusMode]);
 
   return (
-    <main className={`app-shell${focusMode ? " focus-mode" : ""}`}>
+    <main
+      className={`app-shell${focusMode ? " focus-mode" : ""}${
+        panelCollapsed ? " panel-collapsed" : ""
+      }`}
+    >
       <section className="scene-region" aria-label="Three dimensional chess board">
         <ElysiumScene
           audioIntensity={audioIntensity}
@@ -928,6 +978,16 @@ export function GameShell() {
         </div>
       </section>
       <aside className="side-panel">
+        <button
+          aria-expanded={!panelCollapsed}
+          aria-label={panelCollapsed ? "Show panel" : "Hide panel"}
+          className="panel-toggle"
+          onClick={() => setPanelCollapsed((value) => !value)}
+          type="button"
+        >
+          <span>{panelCollapsed ? "Show panel" : "Hide panel"}</span>
+          {panelCollapsed ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+        </button>
         <div className="brand-block">
           <span className="kicker">Online Chess</span>
           <h1>Entering Elysium</h1>
