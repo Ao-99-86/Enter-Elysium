@@ -9,20 +9,24 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "optimize:piano": "gltf-transform optimize assets/grand-piano.glb public/models/grand-piano-optimized.glb --compress meshopt --simplify-ratio 0.15 --simplify-error 0.001"
   },
   "dependencies": {
     "@react-three/drei": "10.7.7",
     "@react-three/fiber": "9.6.1",
+    "@react-three/postprocessing": "^3.0.4",
     "chess.js": "1.4.0",
     "lucide-react": "1.16.0",
     "next": "16.2.6",
+    "postprocessing": "^6.39.1",
     "react": "19.2.6",
     "react-dom": "19.2.6",
     "redis": "5.12.1",
     "three": "0.184.0"
   },
   "devDependencies": {
+    "@gltf-transform/cli": "^4.3.0",
     "@testing-library/react": "16.3.2",
     "@types/node": "25.8.0",
     "@types/react": "19.2.14",
