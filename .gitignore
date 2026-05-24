@@ -16,3 +16,4 @@ npm-debug.log*
 *[Ss]creen [Ss]hot*
 
 refs/
+.envrc

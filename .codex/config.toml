@@ -1,0 +1,6 @@
+[mcp_servers.meshy-mcp-server]
+command = "npx"
+args = [ "-y", "@meshy-ai/meshy-mcp-server" ]
+
+  [mcp_servers.meshy-mcp-server.env]
+  MESHY_API_KEY = "${MESHY_API}"

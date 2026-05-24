@@ -1,10 +1,18 @@
 "use client";
 
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { OrbitControls, Sparkles, Stars } from "@react-three/drei";
+import { OrbitControls, Sparkles, Stars, useGLTF } from "@react-three/drei";
 import { Chess, type Color, type PieceSymbol, type Square } from "chess.js";
 import { useEffect, useMemo, useRef } from "react";
-import { AdditiveBlending, BackSide, Color as ThreeColor, Fog, Shape, Vector3 } from "three";
+import {
+  AdditiveBlending,
+  BackSide,
+  Box3,
+  Color as ThreeColor,
+  Fog,
+  MeshStandardMaterial as ThreeMeshStandardMaterial,
+  Vector3
+} from "three";
 import type {
   AmbientLight,
   BufferAttribute,
@@ -304,53 +312,6 @@ const PLANET_ATMOSPHERE_FRAGMENT_SHADER = `
   }
 `;
 
-const WHALE_FRAGMENT_SHADER = `
-  uniform vec3 uShadowColor;
-  uniform vec3 uSkinColor;
-  uniform vec3 uAuroraColorA;
-  uniform vec3 uAuroraColorB;
-  uniform vec3 uHighlightColor;
-  uniform vec3 uLightDirection;
-  uniform float uTime;
-  uniform float uAudioIntensity;
-  uniform float uOpacity;
-
-  varying vec3 vObjectPosition;
-  varying vec3 vWorldNormal;
-  varying vec3 vViewDirection;
-
-  ${PLANET_NOISE_SHADER}
-
-  void main() {
-    vec3 normal = normalize(vWorldNormal);
-    vec3 viewDirection = normalize(vViewDirection);
-    vec3 samplePoint = vObjectPosition;
-    vec3 drift = vec3(uTime * 0.05, uTime * 0.02, -uTime * 0.04);
-
-    float mottle = fbm(samplePoint * 2.4 + drift);
-    float ribbons = fbm(samplePoint * 5.6 - drift.yzx);
-    float ribbonMask = 1.0 - abs(ribbons * 2.0 - 1.0);
-    float auroraMix = fbm(samplePoint * 1.3 + vec3(uTime * 0.08, 0.0, -uTime * 0.06));
-
-    vec3 base = mix(uShadowColor, uSkinColor, smoothstep(0.32, 0.78, mottle));
-    vec3 auroraColor = mix(uAuroraColorA, uAuroraColorB, auroraMix);
-    vec3 color = mix(base, auroraColor, smoothstep(0.55, 0.92, ribbonMask + mottle * 0.18));
-    color = mix(color, uHighlightColor, smoothstep(0.84, 0.98, ribbonMask));
-
-    float diffuse = max(dot(normal, normalize(uLightDirection)), 0.0);
-    float wrap = clamp(dot(normal, normalize(uLightDirection)) * 0.5 + 0.5, 0.0, 1.0);
-    float rim = pow(1.0 - max(dot(normal, viewDirection), 0.0), 2.5);
-    float pulse = 0.5 + 0.5 * sin(uTime * 0.6 + samplePoint.x * 3.0);
-    float audioGlow = 0.28 + uAudioIntensity * 0.6;
-
-    color *= 0.18 + diffuse * 0.42 + wrap * 0.32;
-    color += auroraColor * rim * audioGlow;
-    color += uHighlightColor * rim * pulse * 0.18;
-
-    gl_FragColor = vec4(color, uOpacity * (0.78 + rim * 0.22));
-  }
-`;
-
 const PLANET_INTERIOR_SURFACE_FRAGMENT_SHADER = `
   uniform vec3 uShadowColor;
   uniform vec3 uEmberColor;
@@ -483,13 +444,13 @@ const WATER_VERTEX_SHADER = `
     vec3 transformed = position;
     vec2 point = position.xy;
     float broadWave =
-      sin(point.x * 0.2 + uTime * 0.55) * 0.5 +
-      sin(point.y * 0.24 - uTime * 0.42) * 0.38 +
-      sin((point.x + point.y) * 0.13 + uTime * 0.34) * 0.28;
-    float fineWave = sin(point.x * 1.45 + point.y * 0.55 + uTime * 1.7) * 0.16;
+      sin(point.x * 0.2 + uTime * 0.36) * 0.5 +
+      sin(point.y * 0.24 - uTime * 0.27) * 0.38 +
+      sin((point.x + point.y) * 0.13 + uTime * 0.22) * 0.28;
+    float fineWave = sin(point.x * 1.45 + point.y * 0.55 + uTime * 1.1) * 0.12;
 
     vWave = broadWave + fineWave;
-    transformed.z += vWave * (0.026 + uAudioIntensity * 0.018) * (1.0 + uSubmersion * 0.55);
+    transformed.z += vWave * (0.022 + uAudioIntensity * 0.018) * (1.0 + uSubmersion * 0.55);
 
     vec4 worldPosition = modelMatrix * vec4(transformed, 1.0);
     vWorldPosition = worldPosition.xyz;
@@ -515,6 +476,28 @@ const WATER_FRAGMENT_SHADER = `
   varying vec3 vWorldPosition;
   varying float vWave;
 
+  float hash21(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+  }
+  float vnoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash21(i), hash21(i + vec2(1.0, 0.0)), u.x),
+               mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), u.x),
+               u.y);
+  }
+  float fbm2(vec2 p) {
+    float v = 0.0;
+    float a = 0.5;
+    for (int i = 0; i < 3; i++) {
+      v += a * vnoise(p);
+      p *= 2.02;
+      a *= 0.5;
+    }
+    return v;
+  }
+
   float stripe(vec2 point, float speed, float width) {
     float wave = sin(point.x * 0.82 + point.y * 0.46 + uTime * speed) * 0.5 + 0.5;
     return smoothstep(1.0 - width, 1.0, wave);
@@ -534,21 +517,43 @@ const WATER_FRAGMENT_SHADER = `
     float depth = smoothstep(8.0, 34.0, distanceFromCenter);
     float softSheen = 0.16 + current * 0.24 + glint * 0.22;
 
-    vec3 color = mix(uSurfaceColor, uDeepColor, depth * 0.72);
-    color += uGlowColor * softSheen * (0.55 + uAudioIntensity * 0.28);
-    color = mix(color, uFoamColor, wake * (0.34 + uAudioIntensity * 0.14));
-    color += uFoamColor * current * 0.08;
-    color = mix(color, uDeepColor, uSubmersion * 0.22);
+    vec2 drift = vec2(uTime * 0.04, uTime * 0.025);
+    float mottle = fbm2(worldPoint * 0.18 + drift);
+    float fineMottle = fbm2(worldPoint * 0.85 - drift.yx);
+
+    vec3 baseDeep = mix(uDeepColor, uPurpleDeep, 0.35);
+    vec3 baseSurface = mix(uSurfaceColor, uPurpleSurface, 0.30);
+    vec3 baseFoam = mix(uFoamColor, uPurpleFoam, 0.28);
+    vec3 baseGlow = mix(uGlowColor, uPurpleGlow, 0.40);
+
+    vec3 color = mix(baseSurface, baseDeep, depth * 0.72);
+    color += baseGlow * softSheen * (0.55 + uAudioIntensity * 0.28);
+    color = mix(color, baseFoam, wake * (0.34 + uAudioIntensity * 0.14));
+    color += baseFoam * current * 0.08;
+    color = mix(color, baseDeep, uSubmersion * 0.22);
+
+    color += baseGlow * (mottle - 0.5) * 0.18;
+    color = mix(color, baseDeep, max(0.0, 0.5 - mottle) * 0.08);
 
     vec3 purpleColor = mix(uPurpleSurface, uPurpleDeep, depth * 0.72);
     purpleColor += uPurpleGlow * softSheen * (0.65 + uAudioIntensity * 0.32);
     purpleColor = mix(purpleColor, uPurpleFoam, wake * (0.38 + uAudioIntensity * 0.18));
     purpleColor += uPurpleFoam * current * 0.1;
     purpleColor = mix(purpleColor, uPurpleDeep, uSubmersion * 0.22);
+    purpleColor += uPurpleGlow * (mottle - 0.5) * 0.22;
 
     color = mix(color, purpleColor, clamp(uPurplePhase, 0.0, 1.0) * 0.95);
 
-    float surfaceAlpha = 0.9 + current * 0.05 + wake * 0.06 + glint * 0.03;
+    vec3 viewDir = normalize(cameraPosition - vWorldPosition);
+    float fresnel = pow(1.0 - clamp(viewDir.y, 0.0, 1.0), 3.2);
+    vec3 fresnelTint = mix(baseGlow, uPurpleGlow, 0.55);
+    color += fresnelTint * fresnel * (0.5 + uAudioIntensity * 0.3);
+
+    float twinkle = 0.5 + 0.5 * sin(uTime * 0.6 + fineMottle * 12.0);
+    float stars = smoothstep(0.86, 0.99, fineMottle) * twinkle;
+    color += baseFoam * stars * 0.6;
+
+    float surfaceAlpha = 0.9 + current * 0.05 + wake * 0.06 + glint * 0.03 + fresnel * 0.04;
     float underwaterAlpha = 0.36 + current * 0.05 + wake * 0.03 + glint * 0.04;
     float alpha = mix(surfaceAlpha, underwaterAlpha, uSubmersion);
     alpha += uPurplePhase * (glint * 0.05 + wake * 0.04);
@@ -1182,7 +1187,7 @@ function WaterPlane({ audioIntensity }: { audioIntensity: number }) {
     }
 
     meshRef.current.position.y =
-      WATER_SURFACE_Y + Math.sin(time * 0.8) * 0.012 - audioIntensity * 0.025;
+      WATER_SURFACE_Y + Math.sin(time * 0.5) * 0.009 - audioIntensity * 0.025;
 
     if (materialRef.current) {
       materialRef.current.uniforms.uAudioIntensity.value = audioIntensity;
@@ -1260,6 +1265,134 @@ function UnderwaterSurface({ audioIntensity }: { audioIntensity: number }) {
     </mesh>
   );
 }
+
+function ConstellationCluster({
+  url,
+  position,
+  scale,
+  rotationSpeed,
+  bobSpeed,
+  bobAmplitude,
+  baseColor,
+  glowColor,
+  emissiveIntensity
+}: {
+  url: string;
+  position: [number, number, number];
+  scale: number;
+  rotationSpeed: number;
+  bobSpeed: number;
+  bobAmplitude: number;
+  baseColor: string;
+  glowColor: string;
+  emissiveIntensity: number;
+}) {
+  const { scene } = useGLTF(url);
+  const ref = useRef<Group | null>(null);
+
+  const cloned = useMemo(() => {
+    const c = scene.clone(true);
+    c.traverse((obj) => {
+      const mesh = obj as Mesh;
+      if (!(mesh as unknown as { isMesh?: boolean }).isMesh) return;
+      mesh.material = new ThreeMeshStandardMaterial({
+        color: new ThreeColor(baseColor),
+        emissive: new ThreeColor(glowColor),
+        emissiveIntensity,
+        metalness: 0.18,
+        roughness: 0.32,
+        transparent: true,
+        opacity: 0.92
+      });
+    });
+    const bbox = new Box3().setFromObject(c);
+    const size = new Vector3();
+    bbox.getSize(size);
+    const maxDim = Math.max(size.x, size.y, size.z) || 1;
+    const norm = 1 / maxDim;
+    c.scale.setScalar(norm);
+    const center = new Vector3();
+    new Box3().setFromObject(c).getCenter(center);
+    c.position.sub(center);
+    return c;
+  }, [scene, baseColor, glowColor, emissiveIntensity]);
+
+  useFrame(({ clock }) => {
+    if (!ref.current) return;
+    const t = clock.elapsedTime;
+    ref.current.position.y = position[1] + Math.sin(t * bobSpeed) * bobAmplitude;
+    ref.current.rotation.y = t * rotationSpeed;
+    ref.current.rotation.x = Math.sin(t * bobSpeed * 0.4) * 0.06;
+  });
+
+  return <primitive ref={ref} object={cloned} position={position} scale={scale} />;
+}
+
+useGLTF.preload("/models/constellation-orb.glb");
+useGLTF.preload("/models/amethyst-shard-cluster.glb");
+useGLTF.preload("/models/cosmic-geode.glb");
+
+function RealisticPiano({
+  position,
+  scale,
+  rotation,
+  audioIntensity
+}: {
+  position: [number, number, number];
+  scale: number;
+  rotation: [number, number, number];
+  audioIntensity: number;
+}) {
+  const { scene } = useGLTF("/models/grand-piano.glb");
+  const cloned = useMemo(() => {
+    const c = scene.clone(true);
+    const bodyMaterial = new ThreeMeshStandardMaterial({
+      color: new ThreeColor("#08090c"),
+      metalness: 0.78,
+      roughness: 0.18,
+      envMapIntensity: 1.2
+    });
+    c.traverse((obj) => {
+      const mesh = obj as Mesh;
+      if (!(mesh as unknown as { isMesh?: boolean }).isMesh) return;
+      mesh.material = bodyMaterial;
+    });
+    const bbox = new Box3().setFromObject(c);
+    const size = new Vector3();
+    bbox.getSize(size);
+    const maxDim = Math.max(size.x, size.y, size.z) || 1;
+    const norm = 1 / maxDim;
+    c.scale.setScalar(norm);
+    const recentered = new Box3().setFromObject(c);
+    const min = recentered.min;
+    const center = new Vector3();
+    recentered.getCenter(center);
+    c.position.set(-center.x, -min.y, -center.z);
+    return c;
+  }, [scene]);
+  const lightRef = useRef<PointLight | null>(null);
+
+  useFrame(() => {
+    if (lightRef.current) {
+      lightRef.current.intensity = 1.4 + audioIntensity * 2.4;
+    }
+  });
+
+  return (
+    <group position={position} scale={scale} rotation={rotation}>
+      <primitive object={cloned} />
+      <pointLight
+        ref={lightRef}
+        color="#9ad9ff"
+        distance={9}
+        intensity={1.4}
+        position={[0, 0.9, 0.4]}
+      />
+    </group>
+  );
+}
+
+useGLTF.preload("/models/grand-piano.glb");
 
 function PurpleRain() {
   const pointsRef = useRef<Points | null>(null);
@@ -1409,175 +1542,6 @@ function SceneAtmosphere({ engulfProgressRef }: { engulfProgressRef: EngulfProgr
   });
 
   return null;
-}
-
-const WHALE_PALETTE = {
-  shadow: "#0a0d22",
-  skin: "#2a3b78",
-  auroraA: INTERIOR_PALETTE.auroraA,
-  auroraB: "#8af7ff",
-  highlight: INTERIOR_PALETTE.coreGlow,
-  halo: "#a4b8ff"
-};
-
-function SpaceWhale({
-  audioIntensity,
-  engulfProgressRef
-}: {
-  audioIntensity: number;
-  engulfProgressRef: EngulfProgressRef;
-}) {
-  const groupRef = useRef<Group | null>(null);
-  const tailRef = useRef<Group | null>(null);
-  const leftFinRef = useRef<Group | null>(null);
-  const rightFinRef = useRef<Group | null>(null);
-  const bodyMaterialRef = useRef<ShaderMaterial | null>(null);
-  const haloMaterialRef = useRef<ShaderMaterial | null>(null);
-
-  const bodyUniforms = useMemo(
-    () => ({
-      uAudioIntensity: { value: 0 },
-      uAuroraColorA: { value: new ThreeColor(WHALE_PALETTE.auroraA) },
-      uAuroraColorB: { value: new ThreeColor(WHALE_PALETTE.auroraB) },
-      uHighlightColor: { value: new ThreeColor(WHALE_PALETTE.highlight) },
-      uLightDirection: { value: PLANET_LIGHT_DIRECTION },
-      uOpacity: { value: 1 },
-      uShadowColor: { value: new ThreeColor(WHALE_PALETTE.shadow) },
-      uSkinColor: { value: new ThreeColor(WHALE_PALETTE.skin) },
-      uTime: { value: 0 }
-    }),
-    []
-  );
-
-  const haloUniforms = useMemo(
-    () => ({
-      uAtmosphereColor: { value: new ThreeColor(WHALE_PALETTE.halo) },
-      uAudioIntensity: { value: 0 },
-      uOpacity: { value: 1 },
-      uTime: { value: 0 }
-    }),
-    []
-  );
-
-  useFrame(({ clock }) => {
-    const time = clock.elapsedTime;
-    const progress = engulfProgressRef.current;
-    const fade = 1 - smoothStep((progress - 0.35) / 0.3);
-
-    const group = groupRef.current;
-    const tail = tailRef.current;
-    const leftFin = leftFinRef.current;
-    const rightFin = rightFinRef.current;
-
-    const speed = 0.06 + audioIntensity * 0.04;
-    const phase = time * speed;
-
-    if (group) {
-      const x = Math.sin(phase) * 14;
-      const y = 4 + Math.sin(phase * 0.7) * 1.2;
-      const z = -14 + Math.cos(phase * 2) * 4;
-      group.position.set(x, y, z);
-
-      const velocityX = Math.cos(phase) * 14;
-      const velocityZ = -Math.sin(phase * 2) * 8;
-      group.rotation.y = Math.atan2(-velocityZ, velocityX);
-      group.rotation.z = Math.sin(phase * 0.5) * 0.12;
-      group.rotation.x = Math.sin(phase * 1.3) * 0.08;
-      group.visible = fade > 0.01;
-    }
-
-    if (tail) {
-      tail.rotation.y = Math.sin(time * 1.8) * 0.35;
-      tail.rotation.z = Math.sin(time * 1.8 + 0.6) * 0.18;
-    }
-
-    if (leftFin) {
-      leftFin.rotation.x = Math.sin(time * 1.2) * 0.22;
-    }
-    if (rightFin) {
-      rightFin.rotation.x = -Math.sin(time * 1.2 + 0.4) * 0.22;
-    }
-
-    if (bodyMaterialRef.current) {
-      bodyMaterialRef.current.uniforms.uTime.value = time;
-      bodyMaterialRef.current.uniforms.uAudioIntensity.value = audioIntensity;
-      bodyMaterialRef.current.uniforms.uOpacity.value = fade;
-    }
-    if (haloMaterialRef.current) {
-      haloMaterialRef.current.uniforms.uTime.value = time;
-      haloMaterialRef.current.uniforms.uAudioIntensity.value = audioIntensity;
-      haloMaterialRef.current.uniforms.uOpacity.value = fade * 0.85;
-    }
-  });
-
-  return (
-    <group ref={groupRef} renderOrder={0}>
-      <mesh scale={[2.4, 0.9, 0.9]}>
-        <sphereGeometry args={[1, 48, 32]} />
-        <shaderMaterial
-          ref={bodyMaterialRef}
-          fragmentShader={WHALE_FRAGMENT_SHADER}
-          transparent
-          uniforms={bodyUniforms}
-          vertexShader={PLANET_VERTEX_SHADER}
-        />
-      </mesh>
-      <mesh scale={[2.6, 1.0, 1.0]} renderOrder={-1}>
-        <sphereGeometry args={[1.08, 32, 24]} />
-        <shaderMaterial
-          ref={haloMaterialRef}
-          blending={AdditiveBlending}
-          depthWrite={false}
-          fragmentShader={PLANET_ATMOSPHERE_FRAGMENT_SHADER}
-          transparent
-          uniforms={haloUniforms}
-          vertexShader={PLANET_VERTEX_SHADER}
-        />
-      </mesh>
-      <group ref={tailRef} position={[-2.2, 0, 0]}>
-        <mesh rotation={[0, 0, Math.PI / 2]} scale={[0.18, 1, 1]}>
-          <coneGeometry args={[0.85, 1.1, 12, 1, true]} />
-          <shaderMaterial
-            fragmentShader={WHALE_FRAGMENT_SHADER}
-            transparent
-            uniforms={bodyUniforms}
-            vertexShader={PLANET_VERTEX_SHADER}
-          />
-        </mesh>
-      </group>
-      <group ref={leftFinRef} position={[0.2, -0.1, 0.85]}>
-        <mesh rotation={[Math.PI / 2, 0, 0.4]} scale={[0.16, 1, 1]}>
-          <coneGeometry args={[0.45, 1.1, 12, 1, true]} />
-          <shaderMaterial
-            fragmentShader={WHALE_FRAGMENT_SHADER}
-            transparent
-            uniforms={bodyUniforms}
-            vertexShader={PLANET_VERTEX_SHADER}
-          />
-        </mesh>
-      </group>
-      <group ref={rightFinRef} position={[0.2, -0.1, -0.85]}>
-        <mesh rotation={[-Math.PI / 2, 0, 0.4]} scale={[0.16, 1, 1]}>
-          <coneGeometry args={[0.45, 1.1, 12, 1, true]} />
-          <shaderMaterial
-            fragmentShader={WHALE_FRAGMENT_SHADER}
-            transparent
-            uniforms={bodyUniforms}
-            vertexShader={PLANET_VERTEX_SHADER}
-          />
-        </mesh>
-      </group>
-      <mesh position={[1.6, 0.1, 0]} scale={[0.7, 0.6, 0.6]}>
-        <sphereGeometry args={[1, 32, 24]} />
-        <shaderMaterial
-          fragmentShader={WHALE_FRAGMENT_SHADER}
-          transparent
-          uniforms={bodyUniforms}
-          vertexShader={PLANET_VERTEX_SHADER}
-        />
-      </mesh>
-    </group>
-  );
 }
 
 function Planet({
@@ -1944,237 +1908,6 @@ function ResponsiveCamera() {
   return null;
 }
 
-const PIANO_WHITE_KEY_COUNT = 14;
-const PIANO_WHITE_KEY_WIDTH = 0.14;
-const PIANO_WHITE_KEY_GAP = 0.012;
-const PIANO_WHITE_KEY_SPAN =
-  PIANO_WHITE_KEY_COUNT * PIANO_WHITE_KEY_WIDTH +
-  (PIANO_WHITE_KEY_COUNT - 1) * PIANO_WHITE_KEY_GAP;
-const PIANO_BLACK_KEY_OFFSETS = [
-  -1.05, -0.79, -0.27, -0.01, 0.25, 0.77, 1.03, 1.29, 1.55
-] as const;
-const PIANO_BLUE_GLOW = "#58bfff";
-
-function DistantGrandPiano({ audioIntensity }: { audioIntensity: number }) {
-  const groupRef = useRef<Group | null>(null);
-  const lidRef = useRef<Group | null>(null);
-  const lightRef = useRef<PointLight | null>(null);
-  const bodyShape = useMemo(() => {
-    const shape = new Shape();
-    shape.moveTo(-1.58, -0.92);
-    shape.lineTo(0.8, -0.92);
-    shape.bezierCurveTo(1.55, -0.88, 2.08, -0.3, 1.88, 0.38);
-    shape.bezierCurveTo(1.62, 1.22, 0.7, 1.48, -0.34, 1.25);
-    shape.bezierCurveTo(-1.2, 1.06, -1.72, 0.52, -1.76, -0.18);
-    shape.bezierCurveTo(-1.78, -0.5, -1.7, -0.78, -1.58, -0.92);
-    return shape;
-  }, []);
-  const lidShape = useMemo(() => {
-    const shape = new Shape();
-    shape.moveTo(-1.28, -0.72);
-    shape.lineTo(0.72, -0.72);
-    shape.bezierCurveTo(1.34, -0.68, 1.76, -0.2, 1.58, 0.3);
-    shape.bezierCurveTo(1.32, 0.98, 0.56, 1.16, -0.26, 1.0);
-    shape.bezierCurveTo(-0.92, 0.84, -1.3, 0.42, -1.34, -0.12);
-    shape.bezierCurveTo(-1.36, -0.38, -1.34, -0.6, -1.28, -0.72);
-    return shape;
-  }, []);
-  const bodyExtrudeSettings = useMemo(
-    () => ({
-      bevelEnabled: true,
-      bevelSegments: 4,
-      bevelSize: 0.05,
-      bevelThickness: 0.04,
-      depth: 0.3,
-      steps: 1
-    }),
-    []
-  );
-  const lidExtrudeSettings = useMemo(
-    () => ({
-      bevelEnabled: true,
-      bevelSegments: 2,
-      bevelSize: 0.025,
-      bevelThickness: 0.018,
-      depth: 0.08,
-      steps: 1
-    }),
-    []
-  );
-
-  useFrame(({ clock }) => {
-    const time = clock.elapsedTime;
-    const group = groupRef.current;
-    const lid = lidRef.current;
-
-    if (group) {
-      group.position.y = -0.15 + Math.sin(time * 0.26) * 0.07;
-      group.rotation.z = 0.02 + Math.sin(time * 0.2) * 0.018;
-      group.rotation.y = -0.95 + Math.sin(time * 0.1) * 0.025;
-    }
-
-    if (lid) {
-      lid.rotation.x = -0.58 + Math.sin(time * 0.22) * 0.018;
-    }
-
-    if (lightRef.current) {
-      lightRef.current.intensity = 2.4 + audioIntensity * 2.8;
-    }
-  });
-
-  const whiteKeyStart = -PIANO_WHITE_KEY_SPAN / 2 + PIANO_WHITE_KEY_WIDTH / 2;
-
-  return (
-    <group
-      ref={groupRef}
-      position={[-1.2, -0.15, -20.5]}
-      rotation={[0, -0.95, 0.02]}
-      scale={1.24}
-    >
-      <mesh renderOrder={30} scale={[2.75, 1.05, 1.9]} raycast={() => null}>
-        <sphereGeometry args={[1, 28, 14]} />
-        <meshBasicMaterial
-          blending={AdditiveBlending}
-          color="#8ee7ff"
-          depthTest={false}
-          depthWrite={false}
-          opacity={0.62}
-          transparent
-        />
-      </mesh>
-      <pointLight
-        ref={lightRef}
-        color={PIANO_BLUE_GLOW}
-        distance={11}
-        intensity={2.4}
-        position={[0.15, 1.2, 0.65]}
-      />
-      <mesh position={[0, 0.36, 0.04]} rotation={[-Math.PI / 2, 0, 0]}>
-        <extrudeGeometry args={[bodyShape, bodyExtrudeSettings]} />
-        <meshStandardMaterial
-          color="#0b3760"
-          emissive={PIANO_BLUE_GLOW}
-          emissiveIntensity={1.15}
-          metalness={0.72}
-          roughness={0.18}
-        />
-      </mesh>
-      <mesh position={[0.06, 0.5, 0.08]} rotation={[-Math.PI / 2, 0, 0]} scale={[0.9, 0.86, 1]}>
-        <extrudeGeometry args={[bodyShape, lidExtrudeSettings]} />
-        <meshStandardMaterial
-          color="#0a3157"
-          emissive={PIANO_BLUE_GLOW}
-          emissiveIntensity={0.72}
-          metalness={0.22}
-          roughness={0.46}
-        />
-      </mesh>
-      <mesh position={[0.1, 0.55, 0.06]} rotation={[-Math.PI / 2, 0, 0]} scale={[0.68, 0.58, 1]}>
-        <ringGeometry args={[0.55, 0.62, 36]} />
-        <meshStandardMaterial color="#c49347" metalness={0.45} roughness={0.32} />
-      </mesh>
-      <group ref={lidRef} position={[-1.24, 0.72, 0.56]} rotation={[-0.58, 0.04, -0.1]}>
-        <mesh position={[1.12, 0, -0.56]} rotation={[-Math.PI / 2, 0, 0]}>
-          <extrudeGeometry args={[lidShape, lidExtrudeSettings]} />
-          <meshStandardMaterial
-            color="#082a4c"
-            emissive={PIANO_BLUE_GLOW}
-            emissiveIntensity={1.25}
-            metalness={0.78}
-            roughness={0.14}
-          />
-        </mesh>
-        <mesh position={[1.12, -0.08, -0.56]} rotation={[-Math.PI / 2, 0, 0]} scale={[0.9, 0.86, 1]}>
-          <extrudeGeometry args={[lidShape, lidExtrudeSettings]} />
-          <meshStandardMaterial color="#17120b" metalness={0.18} roughness={0.5} />
-        </mesh>
-      </group>
-      <mesh position={[-0.08, 0.7, 1.0]}>
-        <boxGeometry args={[2.45, 0.18, 0.34]} />
-        <meshStandardMaterial
-          color="#0b3760"
-          emissive={PIANO_BLUE_GLOW}
-          emissiveIntensity={0.95}
-          metalness={0.7}
-          roughness={0.16}
-        />
-      </mesh>
-      <mesh position={[0, 0.83, 1.16]}>
-        <boxGeometry args={[2.22, 0.08, 0.42]} />
-        <meshStandardMaterial
-          color="#ebe1cf"
-          metalness={0.08}
-          roughness={0.36}
-        />
-      </mesh>
-      {Array.from({ length: PIANO_WHITE_KEY_COUNT }, (_, index) => {
-        const x =
-          whiteKeyStart + index * (PIANO_WHITE_KEY_WIDTH + PIANO_WHITE_KEY_GAP);
-        return (
-          <mesh key={`white-${index}`} position={[x, 0.9, 1.16]}>
-            <boxGeometry args={[PIANO_WHITE_KEY_WIDTH, 0.04, 0.4]} />
-            <meshStandardMaterial
-              color="#f7f1e6"
-              metalness={0.05}
-              roughness={0.28}
-            />
-          </mesh>
-        );
-      })}
-      {PIANO_BLACK_KEY_OFFSETS.map((x, index) => (
-        <mesh key={`black-${index}`} position={[x, 0.94, 1.08]}>
-          <boxGeometry args={[0.08, 0.06, 0.24]} />
-          <meshStandardMaterial
-            color="#050507"
-            metalness={0.34}
-            roughness={0.18}
-          />
-        </mesh>
-      ))}
-      <mesh position={[0.08, 1.02, 0.72]} rotation={[-0.36, 0, 0]}>
-        <boxGeometry args={[1.24, 0.46, 0.04]} />
-        <meshStandardMaterial
-          color="#0b3760"
-          emissive={PIANO_BLUE_GLOW}
-          emissiveIntensity={1.05}
-          metalness={0.62}
-          roughness={0.17}
-        />
-      </mesh>
-      {Array.from({ length: 9 }, (_, index) => {
-        const x = -0.78 + index * 0.2;
-        return (
-          <mesh key={`string-${index}`} position={[x, 0.68, 0.1]} rotation={[0, 0.16, 0]}>
-            <boxGeometry args={[0.018, 0.018, 1.42]} />
-            <meshStandardMaterial color="#d8b15e" metalness={0.75} roughness={0.22} />
-          </mesh>
-        );
-      })}
-      {[
-        [-1.16, -0.28, 0.78] as const,
-        [1.06, -0.28, 0.62] as const,
-        [0.58, -0.28, -0.96] as const
-      ].map(([x, y, z], index) => (
-        <mesh key={`leg-${index}`} position={[x, y, z]}>
-          <cylinderGeometry args={[0.055, 0.075, 1.3, 14]} />
-          <meshStandardMaterial
-            color="#0b3760"
-            emissive={PIANO_BLUE_GLOW}
-            emissiveIntensity={0.78}
-            metalness={0.6}
-            roughness={0.2}
-          />
-        </mesh>
-      ))}
-      {[-0.1, 0.02, 0.14].map((x, index) => (
-        <mesh key={`pedal-${index}`} position={[x, -0.92, 0.9]} rotation={[0.2, 0, 0]}>
-          <boxGeometry args={[0.06, 0.04, 0.26]} />
-          <meshStandardMaterial color="#c49347" metalness={0.8} roughness={0.24} />
-        </mesh>
-      ))}
-    </group>
-  );
-}
 
 function SceneContent(props: ElysiumSceneProps) {
   const perspective = props.playerColor ?? "white";
@@ -2199,7 +1932,6 @@ function SceneContent(props: ElysiumSceneProps) {
         size={1.9 + props.audioIntensity * 3}
         speed={0.22}
       />
-      <SpaceWhale audioIntensity={props.audioIntensity} engulfProgressRef={engulfProgressRef} />
       <Planet
         audioIntensity={props.audioIntensity}
         engulfProgressRef={engulfProgressRef}
@@ -2217,7 +1949,45 @@ function SceneContent(props: ElysiumSceneProps) {
         position={[-1, 1, -11]}
         scale={1.35}
       />
-      <DistantGrandPiano audioIntensity={props.audioIntensity} />
+      <RealisticPiano
+        audioIntensity={props.audioIntensity}
+        position={[-6.5, 0.0, -3.0]}
+        rotation={[0, 0.6, 0]}
+        scale={3.0}
+      />
+      <ConstellationCluster
+        url="/models/constellation-orb.glb"
+        position={[-4.8, 0.45, 3.2]}
+        scale={0.55}
+        rotationSpeed={0.05}
+        bobSpeed={0.28}
+        bobAmplitude={0.05}
+        baseColor="#3a2270"
+        glowColor="#8af7ff"
+        emissiveIntensity={0.3}
+      />
+      <ConstellationCluster
+        url="/models/amethyst-shard-cluster.glb"
+        position={[5.4, 0.4, -1.0]}
+        scale={0.7}
+        rotationSpeed={-0.04}
+        bobSpeed={0.24}
+        bobAmplitude={0.04}
+        baseColor="#4a2178"
+        glowColor="#c08aff"
+        emissiveIntensity={0.55}
+      />
+      <ConstellationCluster
+        url="/models/cosmic-geode.glb"
+        position={[4.2, 0.5, 4.6]}
+        scale={0.6}
+        rotationSpeed={0.05}
+        bobSpeed={0.3}
+        bobAmplitude={0.06}
+        baseColor="#1f0e3a"
+        glowColor="#c08aff"
+        emissiveIntensity={0.45}
+      />
       <WaterPlane audioIntensity={props.audioIntensity} />
       <UnderwaterSurface audioIntensity={props.audioIntensity} />
       <PurpleRain />
