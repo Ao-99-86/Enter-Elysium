@@ -14,6 +14,7 @@ npm-debug.log*
 [Ss]creenshots/
 *[Ss]creenshot*
 *[Ss]creen [Ss]hot*
+.verify-*
 
 refs/
 .envrc
