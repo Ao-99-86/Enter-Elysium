@@ -4,7 +4,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, Sparkles, Stars } from "@react-three/drei";
 import { Chess, type Color, type PieceSymbol, type Square } from "chess.js";
 import { useEffect, useMemo, useRef } from "react";
-import { AdditiveBlending, BackSide, Color as ThreeColor, Fog, Vector3 } from "three";
+import { AdditiveBlending, BackSide, Color as ThreeColor, Fog, Shape, Vector3 } from "three";
 import type {
   AmbientLight,
   BufferAttribute,
@@ -1953,35 +1953,54 @@ const PIANO_WHITE_KEY_SPAN =
 const PIANO_BLACK_KEY_OFFSETS = [
   -1.05, -0.79, -0.27, -0.01, 0.25, 0.77, 1.03, 1.29, 1.55
 ] as const;
+const PIANO_BLUE_GLOW = "#58bfff";
 
-function EtherealPiano({ audioIntensity }: { audioIntensity: number }) {
+function DistantGrandPiano({ audioIntensity }: { audioIntensity: number }) {
   const groupRef = useRef<Group | null>(null);
   const lidRef = useRef<Group | null>(null);
-  const materialsRef = useRef<MeshStandardMaterial[]>([]);
-
-  useEffect(() => {
-    const group = groupRef.current;
-    if (!group) {
-      return;
-    }
-
-    const materials: MeshStandardMaterial[] = [];
-    group.traverse((object) => {
-      const mesh = object as Mesh;
-      const material = mesh.material as
-        | MeshStandardMaterial
-        | MeshStandardMaterial[]
-        | undefined;
-      if (!material) {
-        return;
-      }
-      const list = Array.isArray(material) ? material : [material];
-      list.forEach((item) => {
-        materials.push(item);
-      });
-    });
-    materialsRef.current = materials;
+  const lightRef = useRef<PointLight | null>(null);
+  const bodyShape = useMemo(() => {
+    const shape = new Shape();
+    shape.moveTo(-1.58, -0.92);
+    shape.lineTo(0.8, -0.92);
+    shape.bezierCurveTo(1.55, -0.88, 2.08, -0.3, 1.88, 0.38);
+    shape.bezierCurveTo(1.62, 1.22, 0.7, 1.48, -0.34, 1.25);
+    shape.bezierCurveTo(-1.2, 1.06, -1.72, 0.52, -1.76, -0.18);
+    shape.bezierCurveTo(-1.78, -0.5, -1.7, -0.78, -1.58, -0.92);
+    return shape;
   }, []);
+  const lidShape = useMemo(() => {
+    const shape = new Shape();
+    shape.moveTo(-1.28, -0.72);
+    shape.lineTo(0.72, -0.72);
+    shape.bezierCurveTo(1.34, -0.68, 1.76, -0.2, 1.58, 0.3);
+    shape.bezierCurveTo(1.32, 0.98, 0.56, 1.16, -0.26, 1.0);
+    shape.bezierCurveTo(-0.92, 0.84, -1.3, 0.42, -1.34, -0.12);
+    shape.bezierCurveTo(-1.36, -0.38, -1.34, -0.6, -1.28, -0.72);
+    return shape;
+  }, []);
+  const bodyExtrudeSettings = useMemo(
+    () => ({
+      bevelEnabled: true,
+      bevelSegments: 4,
+      bevelSize: 0.05,
+      bevelThickness: 0.04,
+      depth: 0.3,
+      steps: 1
+    }),
+    []
+  );
+  const lidExtrudeSettings = useMemo(
+    () => ({
+      bevelEnabled: true,
+      bevelSegments: 2,
+      bevelSize: 0.025,
+      bevelThickness: 0.018,
+      depth: 0.08,
+      steps: 1
+    }),
+    []
+  );
 
   useFrame(({ clock }) => {
     const time = clock.elapsedTime;
@@ -1989,19 +2008,18 @@ function EtherealPiano({ audioIntensity }: { audioIntensity: number }) {
     const lid = lidRef.current;
 
     if (group) {
-      group.position.y = 2.2 + Math.sin(time * 0.32) * 0.18;
-      group.rotation.z = 0.05 + Math.sin(time * 0.22) * 0.04;
-      group.rotation.y = -1.0 + Math.sin(time * 0.11) * 0.04;
+      group.position.y = -0.15 + Math.sin(time * 0.26) * 0.07;
+      group.rotation.z = 0.02 + Math.sin(time * 0.2) * 0.018;
+      group.rotation.y = -0.95 + Math.sin(time * 0.1) * 0.025;
     }
 
     if (lid) {
-      lid.rotation.x = -0.5 + Math.sin(time * 0.28) * 0.04;
+      lid.rotation.x = -0.58 + Math.sin(time * 0.22) * 0.018;
     }
 
-    const intensity = 1.4 + audioIntensity * 0.7;
-    materialsRef.current.forEach((material) => {
-      material.emissiveIntensity = intensity;
-    });
+    if (lightRef.current) {
+      lightRef.current.intensity = 2.4 + audioIntensity * 2.8;
+    }
   });
 
   const whiteKeyStart = -PIANO_WHITE_KEY_SPAN / 2 + PIANO_WHITE_KEY_WIDTH / 2;
@@ -2009,121 +2027,149 @@ function EtherealPiano({ audioIntensity }: { audioIntensity: number }) {
   return (
     <group
       ref={groupRef}
-      position={[0.4, 2.2, -10]}
-      rotation={[0, -1.0, 0.05]}
-      scale={1.7}
+      position={[-1.2, -0.15, -20.5]}
+      rotation={[0, -0.95, 0.02]}
+      scale={1.24}
     >
-      <pointLight
-        color={PURPLE_PALETTE.pianoLight}
-        distance={6}
-        intensity={3}
-        position={[0, 0.4, 0.6]}
-      />
-      <mesh position={[0, 0, 0]}>
-        <boxGeometry args={[2.4, 1.4, 1.0]} />
-        <meshStandardMaterial
-          color="#d9c8ff"
+      <mesh renderOrder={30} scale={[2.75, 1.05, 1.9]} raycast={() => null}>
+        <sphereGeometry args={[1, 28, 14]} />
+        <meshBasicMaterial
+          blending={AdditiveBlending}
+          color="#8ee7ff"
+          depthTest={false}
           depthWrite={false}
-          emissive="#6a3fb0"
-          emissiveIntensity={1.4}
-          metalness={0.4}
-          opacity={0.92}
-          roughness={0.2}
+          opacity={0.62}
           transparent
         />
       </mesh>
-      <group ref={lidRef} position={[0, 0.7, -0.5]} rotation={[-0.5, 0, 0]}>
-        <mesh position={[0, 0.04, 0.5]}>
-          <boxGeometry args={[2.4, 0.08, 1.0]} />
+      <pointLight
+        ref={lightRef}
+        color={PIANO_BLUE_GLOW}
+        distance={11}
+        intensity={2.4}
+        position={[0.15, 1.2, 0.65]}
+      />
+      <mesh position={[0, 0.36, 0.04]} rotation={[-Math.PI / 2, 0, 0]}>
+        <extrudeGeometry args={[bodyShape, bodyExtrudeSettings]} />
+        <meshStandardMaterial
+          color="#0b3760"
+          emissive={PIANO_BLUE_GLOW}
+          emissiveIntensity={1.15}
+          metalness={0.72}
+          roughness={0.18}
+        />
+      </mesh>
+      <mesh position={[0.06, 0.5, 0.08]} rotation={[-Math.PI / 2, 0, 0]} scale={[0.9, 0.86, 1]}>
+        <extrudeGeometry args={[bodyShape, lidExtrudeSettings]} />
+        <meshStandardMaterial
+          color="#0a3157"
+          emissive={PIANO_BLUE_GLOW}
+          emissiveIntensity={0.72}
+          metalness={0.22}
+          roughness={0.46}
+        />
+      </mesh>
+      <mesh position={[0.1, 0.55, 0.06]} rotation={[-Math.PI / 2, 0, 0]} scale={[0.68, 0.58, 1]}>
+        <ringGeometry args={[0.55, 0.62, 36]} />
+        <meshStandardMaterial color="#c49347" metalness={0.45} roughness={0.32} />
+      </mesh>
+      <group ref={lidRef} position={[-1.24, 0.72, 0.56]} rotation={[-0.58, 0.04, -0.1]}>
+        <mesh position={[1.12, 0, -0.56]} rotation={[-Math.PI / 2, 0, 0]}>
+          <extrudeGeometry args={[lidShape, lidExtrudeSettings]} />
           <meshStandardMaterial
-            color="#d9c8ff"
-            depthWrite={false}
-            emissive="#6a3fb0"
-            emissiveIntensity={1.1}
-            metalness={0.4}
-            opacity={0.78}
-            roughness={0.2}
-            transparent
+            color="#082a4c"
+            emissive={PIANO_BLUE_GLOW}
+            emissiveIntensity={1.25}
+            metalness={0.78}
+            roughness={0.14}
           />
         </mesh>
+        <mesh position={[1.12, -0.08, -0.56]} rotation={[-Math.PI / 2, 0, 0]} scale={[0.9, 0.86, 1]}>
+          <extrudeGeometry args={[lidShape, lidExtrudeSettings]} />
+          <meshStandardMaterial color="#17120b" metalness={0.18} roughness={0.5} />
+        </mesh>
       </group>
-      <mesh position={[0, 0.78, 0.32]}>
-        <boxGeometry args={[2.3, 0.12, 0.55]} />
+      <mesh position={[-0.08, 0.7, 1.0]}>
+        <boxGeometry args={[2.45, 0.18, 0.34]} />
         <meshStandardMaterial
-          color="#f4ecff"
-          depthWrite={false}
-          emissive="#6a3fb0"
-          emissiveIntensity={0.85}
-          metalness={0.25}
-          opacity={0.85}
-          roughness={0.32}
-          transparent
+          color="#0b3760"
+          emissive={PIANO_BLUE_GLOW}
+          emissiveIntensity={0.95}
+          metalness={0.7}
+          roughness={0.16}
+        />
+      </mesh>
+      <mesh position={[0, 0.83, 1.16]}>
+        <boxGeometry args={[2.22, 0.08, 0.42]} />
+        <meshStandardMaterial
+          color="#ebe1cf"
+          metalness={0.08}
+          roughness={0.36}
         />
       </mesh>
       {Array.from({ length: PIANO_WHITE_KEY_COUNT }, (_, index) => {
         const x =
           whiteKeyStart + index * (PIANO_WHITE_KEY_WIDTH + PIANO_WHITE_KEY_GAP);
         return (
-          <mesh key={`white-${index}`} position={[x, 0.88, 0.4]}>
+          <mesh key={`white-${index}`} position={[x, 0.9, 1.16]}>
             <boxGeometry args={[PIANO_WHITE_KEY_WIDTH, 0.04, 0.4]} />
             <meshStandardMaterial
-              color="#f4ecff"
-              depthWrite={false}
-              emissive="#6a3fb0"
-              emissiveIntensity={0.9}
-              metalness={0.25}
-              opacity={0.92}
+              color="#f7f1e6"
+              metalness={0.05}
               roughness={0.28}
-              transparent
             />
           </mesh>
         );
       })}
       {PIANO_BLACK_KEY_OFFSETS.map((x, index) => (
-        <mesh key={`black-${index}`} position={[x, 0.93, 0.32]}>
+        <mesh key={`black-${index}`} position={[x, 0.94, 1.08]}>
           <boxGeometry args={[0.08, 0.06, 0.24]} />
           <meshStandardMaterial
-            color="#2a1144"
-            depthWrite={false}
-            emissive="#6a3fb0"
-            emissiveIntensity={1.0}
-            metalness={0.5}
-            opacity={0.92}
-            roughness={0.22}
-            transparent
+            color="#050507"
+            metalness={0.34}
+            roughness={0.18}
           />
         </mesh>
       ))}
-      <mesh position={[0, 1.05, -0.05]} rotation={[-0.35, 0, 0]}>
-        <boxGeometry args={[1.6, 0.5, 0.05]} />
+      <mesh position={[0.08, 1.02, 0.72]} rotation={[-0.36, 0, 0]}>
+        <boxGeometry args={[1.24, 0.46, 0.04]} />
         <meshStandardMaterial
-          color="#d9c8ff"
-          depthWrite={false}
-          emissive="#6a3fb0"
-          emissiveIntensity={1.0}
-          metalness={0.35}
-          opacity={0.7}
-          roughness={0.28}
-          transparent
+          color="#0b3760"
+          emissive={PIANO_BLUE_GLOW}
+          emissiveIntensity={1.05}
+          metalness={0.62}
+          roughness={0.17}
         />
       </mesh>
+      {Array.from({ length: 9 }, (_, index) => {
+        const x = -0.78 + index * 0.2;
+        return (
+          <mesh key={`string-${index}`} position={[x, 0.68, 0.1]} rotation={[0, 0.16, 0]}>
+            <boxGeometry args={[0.018, 0.018, 1.42]} />
+            <meshStandardMaterial color="#d8b15e" metalness={0.75} roughness={0.22} />
+          </mesh>
+        );
+      })}
       {[
-        [-1.05, -1.5, 0.4] as const,
-        [1.05, -1.5, 0.4] as const,
-        [0, -1.5, -0.4] as const
+        [-1.16, -0.28, 0.78] as const,
+        [1.06, -0.28, 0.62] as const,
+        [0.58, -0.28, -0.96] as const
       ].map(([x, y, z], index) => (
         <mesh key={`leg-${index}`} position={[x, y, z]}>
-          <cylinderGeometry args={[0.06, 0.06, 1.6, 12]} />
+          <cylinderGeometry args={[0.055, 0.075, 1.3, 14]} />
           <meshStandardMaterial
-            color="#d9c8ff"
-            depthWrite={false}
-            emissive="#6a3fb0"
-            emissiveIntensity={1.0}
-            metalness={0.4}
-            opacity={0.7}
-            roughness={0.25}
-            transparent
+            color="#0b3760"
+            emissive={PIANO_BLUE_GLOW}
+            emissiveIntensity={0.78}
+            metalness={0.6}
+            roughness={0.2}
           />
+        </mesh>
+      ))}
+      {[-0.1, 0.02, 0.14].map((x, index) => (
+        <mesh key={`pedal-${index}`} position={[x, -0.92, 0.9]} rotation={[0.2, 0, 0]}>
+          <boxGeometry args={[0.06, 0.04, 0.26]} />
+          <meshStandardMaterial color="#c49347" metalness={0.8} roughness={0.24} />
         </mesh>
       ))}
     </group>
@@ -2171,7 +2217,7 @@ function SceneContent(props: ElysiumSceneProps) {
         position={[-1, 1, -11]}
         scale={1.35}
       />
-      <EtherealPiano audioIntensity={props.audioIntensity} />
+      <DistantGrandPiano audioIntensity={props.audioIntensity} />
       <WaterPlane audioIntensity={props.audioIntensity} />
       <UnderwaterSurface audioIntensity={props.audioIntensity} />
       <PurpleRain />
