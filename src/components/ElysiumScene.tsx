@@ -2,9 +2,12 @@
 
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, Sparkles, Stars, useGLTF } from "@react-three/drei";
+import { EffectComposer, Bloom, Vignette, Noise } from "@react-three/postprocessing";
+import { BlendFunction, KernelSize } from "postprocessing";
 import { Chess, type Color, type PieceSymbol, type Square } from "chess.js";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ACESFilmicToneMapping,
   AdditiveBlending,
   BackSide,
   Box3,
@@ -1908,6 +1911,60 @@ function ResponsiveCamera() {
   return null;
 }
 
+function PostFx() {
+  const { size, gl } = useThree();
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    const check = () => {
+      if (cancelled) return;
+      const ctx = gl.getContext();
+      if (ctx && ctx.getContextAttributes()) {
+        setReady(true);
+      } else {
+        requestAnimationFrame(check);
+      }
+    };
+    check();
+    return () => {
+      cancelled = true;
+      setReady(false);
+    };
+  }, [gl]);
+  if (!ready) return null;
+  const narrow = size.width < 700;
+  if (narrow) {
+    return (
+      <EffectComposer enableNormalPass={false} multisampling={0}>
+        <Bloom
+          intensity={0.55}
+          luminanceThreshold={0.82}
+          luminanceSmoothing={0.18}
+          mipmapBlur
+          kernelSize={KernelSize.SMALL}
+        />
+      </EffectComposer>
+    );
+  }
+  return (
+    <EffectComposer enableNormalPass={false} multisampling={2}>
+      <Bloom
+        intensity={0.95}
+        luminanceThreshold={0.82}
+        luminanceSmoothing={0.18}
+        mipmapBlur
+        kernelSize={KernelSize.MEDIUM}
+      />
+      <Vignette
+        offset={0.32}
+        darkness={0.55}
+        blendFunction={BlendFunction.NORMAL}
+      />
+      <Noise opacity={0.035} blendFunction={BlendFunction.OVERLAY} />
+    </EffectComposer>
+  );
+}
+
 
 function SceneContent(props: ElysiumSceneProps) {
   const perspective = props.playerColor ?? "white";
@@ -1964,7 +2021,7 @@ function SceneContent(props: ElysiumSceneProps) {
         bobAmplitude={0.05}
         baseColor="#3a2270"
         glowColor="#8af7ff"
-        emissiveIntensity={0.3}
+        emissiveIntensity={0.6}
       />
       <ConstellationCluster
         url="/models/amethyst-shard-cluster.glb"
@@ -1975,7 +2032,7 @@ function SceneContent(props: ElysiumSceneProps) {
         bobAmplitude={0.04}
         baseColor="#4a2178"
         glowColor="#c08aff"
-        emissiveIntensity={0.55}
+        emissiveIntensity={0.9}
       />
       <ConstellationCluster
         url="/models/cosmic-geode.glb"
@@ -1986,7 +2043,7 @@ function SceneContent(props: ElysiumSceneProps) {
         bobAmplitude={0.06}
         baseColor="#1f0e3a"
         glowColor="#c08aff"
-        emissiveIntensity={0.45}
+        emissiveIntensity={0.8}
       />
       <WaterPlane audioIntensity={props.audioIntensity} />
       <UnderwaterSurface audioIntensity={props.audioIntensity} />
@@ -2011,6 +2068,7 @@ function SceneContent(props: ElysiumSceneProps) {
         minPolarAngle={Math.PI / 4}
         target={[0, 0, 0]}
       />
+      <PostFx />
     </>
   );
 }
@@ -2020,7 +2078,12 @@ export function ElysiumScene(props: ElysiumSceneProps) {
     <Canvas
       camera={{ position: [6.4, 5.9, 7.6], fov: 52 }}
       dpr={1}
-      gl={{ antialias: true, alpha: false }}
+      gl={{
+        antialias: true,
+        alpha: false,
+        toneMapping: ACESFilmicToneMapping,
+        toneMappingExposure: 1.0
+      }}
       onCreated={({ camera }) => {
         camera.lookAt(0, 0, 0);
       }}
