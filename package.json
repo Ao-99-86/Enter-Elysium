@@ -9,7 +9,8 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "optimize:piano": "gltf-transform optimize assets/grand-piano.glb public/models/grand-piano-optimized.glb --compress meshopt --simplify-ratio 0.15 --simplify-error 0.001"
   },
   "dependencies": {
     "@react-three/drei": "10.7.7",
@@ -25,6 +26,7 @@
     "three": "0.184.0"
   },
   "devDependencies": {
+    "@gltf-transform/cli": "^4.3.0",
     "@testing-library/react": "16.3.2",
     "@types/node": "25.8.0",
     "@types/react": "19.2.14",

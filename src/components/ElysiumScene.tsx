@@ -2,6 +2,7 @@
 
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, Sparkles, Stars, useGLTF } from "@react-three/drei";
+import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { EffectComposer, Bloom, Vignette, Noise } from "@react-three/postprocessing";
 import { BlendFunction, KernelSize } from "postprocessing";
 import { Chess, type Color, type PieceSymbol, type Square } from "chess.js";
@@ -14,6 +15,7 @@ import {
   Color as ThreeColor,
   Fog,
   MeshStandardMaterial as ThreeMeshStandardMaterial,
+  PMREMGenerator,
   Vector3
 } from "three";
 import type {
@@ -27,7 +29,9 @@ import type {
   Points,
   PointsMaterial,
   PointLight,
-  ShaderMaterial
+  ShaderMaterial,
+  Texture,
+  WebGLRenderer
 } from "three";
 import type { PlayerColor, PublicRoom } from "@/lib/rooms/types";
 
@@ -1335,6 +1339,23 @@ useGLTF.preload("/models/constellation-orb.glb");
 useGLTF.preload("/models/amethyst-shard-cluster.glb");
 useGLTF.preload("/models/cosmic-geode.glb");
 
+// The optimized piano GLB is geometry-only (no UVs/normals/materials), so the
+// polished-black metal has nothing to reflect on its own. Bake a small, neutral
+// procedural environment once per renderer and reflect it on the piano material
+// only — assigning to material.envMap keeps it scoped (no scene.environment, so
+// the chess pieces and orbs are untouched). RoomEnvironment ships with three, so
+// there is no HDRI download.
+const pianoEnvCache = new WeakMap<WebGLRenderer, Texture>();
+function getPianoEnvMap(gl: WebGLRenderer): Texture {
+  const cached = pianoEnvCache.get(gl);
+  if (cached) return cached;
+  const pmrem = new PMREMGenerator(gl);
+  const envTexture = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+  pmrem.dispose();
+  pianoEnvCache.set(gl, envTexture);
+  return envTexture;
+}
+
 function RealisticPiano({
   position,
   scale,
@@ -1346,18 +1367,23 @@ function RealisticPiano({
   rotation: [number, number, number];
   audioIntensity: number;
 }) {
-  const { scene } = useGLTF("/models/grand-piano.glb");
+  const { scene } = useGLTF("/models/grand-piano-optimized.glb");
+  const gl = useThree((state) => state.gl);
   const cloned = useMemo(() => {
     const c = scene.clone(true);
     const bodyMaterial = new ThreeMeshStandardMaterial({
       color: new ThreeColor("#08090c"),
       metalness: 0.78,
       roughness: 0.18,
-      envMapIntensity: 1.2
+      envMap: getPianoEnvMap(gl),
+      envMapIntensity: 0.6
     });
     c.traverse((obj) => {
       const mesh = obj as Mesh;
       if (!(mesh as unknown as { isMesh?: boolean }).isMesh) return;
+      // The mesh ships without normals; derive smooth normals so the metal
+      // shades and reflects correctly.
+      mesh.geometry.computeVertexNormals();
       mesh.material = bodyMaterial;
     });
     const bbox = new Box3().setFromObject(c);
@@ -1372,7 +1398,7 @@ function RealisticPiano({
     recentered.getCenter(center);
     c.position.set(-center.x, -min.y, -center.z);
     return c;
-  }, [scene]);
+  }, [scene, gl]);
   const lightRef = useRef<PointLight | null>(null);
 
   useFrame(() => {
@@ -1395,7 +1421,7 @@ function RealisticPiano({
   );
 }
 
-useGLTF.preload("/models/grand-piano.glb");
+useGLTF.preload("/models/grand-piano-optimized.glb");
 
 function PurpleRain() {
   const pointsRef = useRef<Points | null>(null);
